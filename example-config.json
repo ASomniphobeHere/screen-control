@@ -1,0 +1,26 @@
+{
+  "pc_name": "PC-1",
+  "utc_offset_minutes": 180,
+  "parents": [
+    { "name": "Mom", "telegram_user_id": 111111111 },
+    { "name": "Dad", "telegram_user_id": 222222222 }
+  ],
+  "children": [
+    {
+      "id": "janis",
+      "name": "Jānis",
+      "sid": "S-1-5-21-1111111111-2222222222-3333333333-1001",
+      "telegram_user_id": 333333333,
+      "limits": { "default": 120, "sat": 240, "sun": 240 },
+      "allowed_hours": "08:00-21:00"
+    },
+    {
+      "id": "peteris",
+      "name": "Pēteris",
+      "sid": "S-1-5-21-1111111111-2222222222-3333333333-1002",
+      "telegram_user_id": 444444444,
+      "limits": { "default": 90, "fri": 150, "sat": 180, "sun": 180 },
+      "allowed_hours": "08:00-20:30"
+    }
+  ]
+}

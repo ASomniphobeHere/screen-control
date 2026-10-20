@@ -330,6 +330,12 @@ pub mod tests {
     }
 
     #[test]
+    fn example_config_in_repo_is_good() {
+        let cfg = Config::from_json(include_str!("../../example-config.json")).unwrap();
+        assert_eq!(cfg.validate(Some("PC-1")), Vec::<String>::new());
+    }
+
+    #[test]
     fn day_limit_falls_back_to_default() {
         let cfg = good();
         assert_eq!(cfg.children[0].limits.for_day(Weekday::Sat), Some(120));
