@@ -1,9 +1,8 @@
-// The engine is not called until the main loop exists (plan step 6). Remove this then.
-#![allow(dead_code)]
-
+mod app;
 mod core;
 mod logging;
 mod storage;
+mod win;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -11,7 +10,8 @@ use std::sync::mpsc;
 
 use anyhow::{Context, Result, bail};
 
-use crate::core::config::{Config, Secrets};
+use crate::app::{DataDir, Event};
+use crate::core::config::Config;
 
 const USAGE: &str = "\
 Usage:
@@ -40,32 +40,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// Paths of the files in the data folder.
-struct DataDir(PathBuf);
-
-impl DataDir {
-    fn default_path() -> PathBuf {
-        let base = std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into());
-        PathBuf::from(base).join("ScreenTime")
-    }
-
-    fn config(&self) -> PathBuf {
-        self.0.join("config.json")
-    }
-
-    fn secrets(&self) -> PathBuf {
-        self.0.join("secrets.json")
-    }
-
-    fn state(&self) -> PathBuf {
-        self.0.join("state.json")
-    }
-
-    fn logs(&self) -> PathBuf {
-        self.0.join("logs")
-    }
-}
-
 /// Gets the value after `--name`, if given.
 fn option<'a>(args: &'a [String], name: &str) -> Result<Option<&'a str>> {
     match args.iter().position(|a| a == name) {
@@ -91,39 +65,17 @@ fn run_console(args: &[String]) -> Result<ExitCode> {
     });
     tracing::info!(data_dir = %data.0.display(), "starting in console mode");
 
-    let (cfg, _secrets) = load_checked(&data)?;
-    tracing::info!(pc = %cfg.pc_name, children = cfg.children.len(), parents = cfg.parents.len(), "config loaded");
-    let state = storage::load_state(&data.state());
+    let (cfg, _secrets) = app::load_checked(&data)?;
 
-    let (stop_tx, stop_rx) = mpsc::channel();
+    let (events, rx) = mpsc::channel();
     ctrlc::set_handler(move || {
-        let _ = stop_tx.send(());
+        let _ = events.send(Event::Stop);
     })
     .context("cannot set the Ctrl+C handler")?;
-    tracing::info!("running, press Ctrl+C to stop");
+    tracing::info!("press Ctrl+C to stop");
 
-    // The main loop comes in plan step 6. Until then, wait for Ctrl+C.
-    let _ = stop_rx.recv();
-
-    storage::save_json(&data.state(), &state)?;
-    tracing::info!("stopped, state saved");
+    app::run(&data, cfg, rx)?;
     Ok(ExitCode::SUCCESS)
-}
-
-/// Loads `secrets.json` (if there is one) and `config.json`, and checks the config.
-fn load_checked(data: &DataDir) -> Result<(Config, Option<Secrets>)> {
-    let secrets = if data.secrets().exists() {
-        Some(Secrets::load(&data.secrets())?)
-    } else {
-        tracing::warn!(path = %data.secrets().display(), "no secrets file, Telegram and config updates are off");
-        None
-    };
-    let cfg = Config::load(&data.config())?;
-    let errors = cfg.validate(secrets.as_ref().map(|s| s.pc_name.as_str()));
-    if !errors.is_empty() {
-        bail!("config has errors:\n  {}", errors.join("\n  "));
-    }
-    Ok((cfg, secrets))
 }
 
 fn check_config(args: &[String]) -> Result<ExitCode> {

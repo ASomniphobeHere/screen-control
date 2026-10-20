@@ -1,6 +1,6 @@
 //! One tick of the rules: sessions in, actions out. No Windows calls here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -14,6 +14,13 @@ pub const WARN_MINUTES: [u32; 3] = [10, 5, 1];
 
 /// Time between "time is up" and sign-out, so the child can see the message.
 pub const GRACE: Duration = Duration::from_secs(10);
+
+/// Shorter grace for a session that starts when time is already up.
+/// The child got the warnings before, so there is nothing to save.
+pub const LOGON_GRACE: Duration = Duration::from_secs(5);
+
+/// If a session is still there this long after a sign-out, sign it out again.
+const LOGOFF_RETRY: Duration = Duration::from_secs(10);
 
 /// An active Windows session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +51,8 @@ pub enum Action {
         session: u32,
         child_id: String,
         reason: Reason,
+        /// Seconds until sign-out.
+        grace_s: u64,
     },
     Logoff {
         session: u32,
@@ -56,12 +65,17 @@ pub enum Action {
 #[derive(Debug)]
 struct Pending {
     waited: Duration,
+    grace: Duration,
+    /// `waited` when the last sign-out was sent.
+    logoff_sent: Option<Duration>,
 }
 
 pub struct Engine {
     max_delta: Duration,
     /// By session ID. Not saved: after a restart, the child gets the message again.
     pending: HashMap<u32, Pending>,
+    /// Session IDs from the last tick, to find new sessions.
+    seen: HashSet<u32>,
 }
 
 impl Engine {
@@ -69,7 +83,13 @@ impl Engine {
         Engine {
             max_delta: tick_interval * 2,
             pending: HashMap::new(),
+            seen: HashSet::new(),
         }
+    }
+
+    /// True while a session waits for sign-out. The main loop then ticks more often.
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
     }
 
     pub fn tick(
@@ -107,6 +127,7 @@ impl Engine {
 
         self.pending
             .retain(|id, _| sessions.iter().any(|s| s.id == *id));
+        let seen = std::mem::replace(&mut self.seen, sessions.iter().map(|s| s.id).collect());
 
         for s in sessions {
             let Some(child) = cfg.child_by_sid(&s.sid) else {
@@ -119,7 +140,10 @@ impl Engine {
             }
 
             let cs = state.child_mut(&child.id);
-            cs.used_ms += delta_ms;
+            // A new session started after the last tick, so the time before it was not used.
+            if seen.contains(&s.id) {
+                cs.used_ms += delta_ms;
+            }
 
             // A missing limit cannot pass the config checks. If it happens anyway, allow nothing.
             let limit_ms = child.limits.for_day(now.weekday).unwrap_or(0) as i64 * 60_000;
@@ -150,22 +174,35 @@ impl Engine {
             if left_ms <= 0 {
                 match self.pending.get_mut(&s.id) {
                     None => {
+                        let grace = if seen.contains(&s.id) {
+                            GRACE
+                        } else {
+                            LOGON_GRACE
+                        };
                         self.pending.insert(
                             s.id,
                             Pending {
                                 waited: Duration::ZERO,
+                                grace,
+                                logoff_sent: None,
                             },
                         );
                         actions.push(Action::TimeUp {
                             session: s.id,
                             child_id: child.id.clone(),
                             reason,
+                            grace_s: grace.as_secs(),
                         });
                     }
                     Some(p) => {
                         p.waited += delta;
-                        // Sent again on each tick until the session is gone, in case a sign-out fails.
-                        if p.waited >= GRACE {
+                        let due = match p.logoff_sent {
+                            None => p.waited >= p.grace,
+                            // Sent again if the session is still there, in case a sign-out failed.
+                            Some(sent) => p.waited - sent >= LOGOFF_RETRY,
+                        };
+                        if due {
+                            p.logoff_sent = Some(p.waited);
                             actions.push(Action::Logoff {
                                 session: s.id,
                                 child_id: child.id.clone(),
@@ -266,14 +303,28 @@ mod tests {
             locked: true,
             ..session(2, PETERIS)
         };
-        t.tick(&[session(1, JANIS), locked, session(3, "S-1-5-21-1-500")]);
+        let s = [session(1, JANIS), locked, session(3, "S-1-5-21-1-500")];
+        t.tick(&s);
+        t.tick(&s);
         assert_eq!(t.state.children.keys().collect::<Vec<_>>(), ["janis"]);
+        assert_eq!(t.used_s("janis"), 20);
+    }
+
+    #[test]
+    fn first_tick_of_a_new_session_counts_nothing() {
+        let mut t = Test::new();
+        t.tick(&[]);
+        // Signed in just before this tick: the 20 s before were not used.
+        t.tick(&[session(1, JANIS)]);
+        assert_eq!(t.used_s("janis"), 0);
+        t.tick(&[session(1, JANIS)]);
         assert_eq!(t.used_s("janis"), 20);
     }
 
     #[test]
     fn long_time_step_is_capped() {
         let mut t = Test::new();
+        t.tick(&[session(1, JANIS)]);
         t.tick_by(Duration::from_secs(3600), &[session(1, JANIS)]);
         assert_eq!(t.used_s("janis"), 40);
     }
@@ -281,8 +332,10 @@ mod tests {
     #[test]
     fn two_children_are_counted_apart() {
         let mut t = Test::new();
-        t.tick(&[session(1, JANIS)]);
-        t.tick(&[session(1, JANIS)]);
+        for _ in 0..3 {
+            t.tick(&[session(1, JANIS)]);
+        }
+        t.tick(&[session(2, PETERIS)]);
         t.tick(&[session(2, PETERIS)]);
         assert_eq!(t.used_s("janis"), 40);
         assert_eq!(t.used_s("peteris"), 20);
@@ -314,9 +367,9 @@ mod tests {
     #[test]
     fn time_up_then_logoff_after_grace() {
         let mut t = Test::new();
-        t.tick(&[]);
-        t.state.child_mut("peteris").used_ms = 30 * 60_000 - 10_000;
         let s = [session(1, PETERIS)];
+        t.tick(&s);
+        t.state.child_mut("peteris").used_ms = 30 * 60_000 - 10_000;
 
         let actions = t.tick(&s);
         assert_eq!(
@@ -324,14 +377,21 @@ mod tests {
             vec![Action::TimeUp {
                 session: 1,
                 child_id: "peteris".into(),
-                reason: Reason::Budget
+                reason: Reason::Budget,
+                grace_s: 10,
             }]
         );
 
-        // A session event can cause a tick soon after: still in the grace time.
-        assert!(t.tick_by(Duration::from_secs(2), &s).is_empty());
-
-        let actions = t.tick(&s);
+        // Ticks come every second while a sign-out is pending.
+        let mut ticks = 0;
+        let actions = loop {
+            ticks += 1;
+            let actions = t.tick_by(Duration::from_secs(1), &s);
+            if !actions.is_empty() {
+                break actions;
+            }
+        };
+        assert_eq!(ticks, 10);
         assert_eq!(
             actions,
             vec![Action::Logoff {
@@ -341,18 +401,32 @@ mod tests {
             }]
         );
 
-        // Sent again while the session is still there.
-        assert_eq!(t.tick(&s).len(), 1);
+        // Sent again only if the session is still there after a while.
+        assert!(t.tick_by(Duration::from_secs(9), &s).is_empty());
+        assert_eq!(t.tick_by(Duration::from_secs(1), &s).len(), 1);
     }
 
     #[test]
-    fn sign_in_after_time_ended_gets_time_up() {
+    fn sign_in_after_time_ended_gets_short_grace() {
         let mut t = Test::new();
         t.tick(&[]);
         t.state.child_mut("peteris").used_ms = 30 * 60_000;
 
-        let actions = t.tick_by(Duration::from_millis(500), &[session(7, PETERIS)]);
-        assert!(matches!(actions[..], [Action::TimeUp { session: 7, .. }]));
+        let s = [session(7, PETERIS)];
+        let actions = t.tick_by(Duration::from_millis(500), &s);
+        assert!(matches!(
+            actions[..],
+            [Action::TimeUp {
+                session: 7,
+                grace_s: 5,
+                ..
+            }]
+        ));
+        assert!(t.tick_by(Duration::from_secs(4), &s).is_empty());
+        assert!(matches!(
+            t.tick_by(Duration::from_secs(1), &s)[..],
+            [Action::Logoff { session: 7, .. }]
+        ));
     }
 
     #[test]
@@ -429,6 +503,7 @@ mod tests {
     fn new_day_resets_used_time() {
         let mut t = Test::new();
         t.tick(&[session(1, JANIS)]);
+        t.tick(&[session(1, JANIS)]);
         assert_eq!(t.used_s("janis"), 20);
         t.now += chrono::TimeDelta::days(1);
         t.tick(&[session(1, JANIS)]);
@@ -438,6 +513,7 @@ mod tests {
     #[test]
     fn clock_back_to_yesterday_does_not_reset() {
         let mut t = Test::new();
+        t.tick(&[session(1, JANIS)]);
         t.tick(&[session(1, JANIS)]);
         t.now -= chrono::TimeDelta::hours(13); // 23:00 the day before
         t.tick(&[session(1, JANIS)]);
