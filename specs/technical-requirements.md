@@ -46,7 +46,8 @@
   - an ID and a name,
   - the Windows account SID on this PC,
   - their Telegram user ID,
-  - limits for each week day and allowed hours.
+  - limits in minutes for each week day (`mon` … `sun`), with `default` for days not set. Every day must have a limit,
+  - allowed hours, for example `08:00-21:00` (optional: without it, any hour is allowed).
 - `state.json` — for each child: today's used time and extra time. Also open extra time requests and the last seen UTC time.
 - Example `config.json`:
 
@@ -64,7 +65,7 @@
         "name": "Jānis",
         "sid": "S-1-5-21-...-1001",
         "telegram_user_id": 222222,
-        "limits": { "mon": 120, "tue": 120, "sat": 240 },
+        "limits": { "default": 120, "sat": 240, "sun": 240 },
         "allowed_hours": "08:00-21:00"
       }
     ]
