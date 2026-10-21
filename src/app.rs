@@ -59,6 +59,11 @@ impl DataDir {
         self.0.join("config.json")
     }
 
+    /// A copy of the last config that passed the checks.
+    pub fn config_backup(&self) -> PathBuf {
+        self.0.join("config.last-good.json")
+    }
+
     pub fn secrets(&self) -> PathBuf {
         self.0.join("secrets.json")
     }
@@ -72,8 +77,10 @@ impl DataDir {
     }
 }
 
-/// Loads `secrets.json` (if there is one) and `config.json`, and checks the config.
-/// If the local config cannot be used, it is downloaded from the config repo.
+/// Loads `secrets.json` (if there is one) and the config, and checks the config.
+///
+/// Without a good config nothing is limited, so the config is taken from the first of these that works:
+/// `config.json`, the config repo, then `config.last-good.json`.
 pub fn load_checked(data: &DataDir) -> Result<(Config, Option<Secrets>)> {
     let secrets = if data.secrets().exists() {
         Some(Secrets::load(&data.secrets())?)
@@ -82,28 +89,61 @@ pub fn load_checked(data: &DataDir) -> Result<(Config, Option<Secrets>)> {
         None
     };
     let pc_name = secrets.as_ref().map(|s| s.pc_name.as_str());
-    let local = Config::load(&data.config()).and_then(|cfg| checked(cfg, pc_name));
-    let error = match local {
-        Ok(cfg) => return Ok((cfg, secrets)),
-        Err(e) => e,
+    let check = |text: String| -> Result<(Config, String)> {
+        let cfg = Config::from_json(&text).and_then(|cfg| checked(cfg, pc_name))?;
+        Ok((cfg, text))
     };
-    // Without a good config nothing is limited, so try the config repo before giving up.
-    let Some(repo) = secrets.as_ref().and_then(config_repo) else {
-        return Err(error);
+    let read = |path: PathBuf| {
+        std::fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))
     };
-    tracing::error!(
-        error = format!("{error:#}"),
-        "local config cannot be used, getting it from GitHub"
-    );
-    let (_, text) = repo
-        .fetch()
-        .with_context(|| format!("{error:#}\nGetting the config from GitHub failed too"))?;
-    let cfg = Config::from_json(&text)
-        .and_then(|cfg| checked(cfg, pc_name))
-        .with_context(|| format!("{error:#}\nThe config on GitHub cannot be used either"))?;
-    storage::save_text(&data.config(), &text)?;
-    tracing::info!("config downloaded from GitHub");
-    Ok((cfg, secrets))
+    let mut errors = Vec::new();
+
+    match read(data.config()).and_then(check) {
+        Ok((cfg, text)) => {
+            save_backup(data, &text);
+            return Ok((cfg, secrets));
+        }
+        Err(e) => {
+            tracing::error!(error = format!("{e:#}"), "config.json cannot be used");
+            errors.push(format!("config.json: {e:#}"));
+        }
+    }
+
+    if let Some(repo) = secrets.as_ref().and_then(config_repo) {
+        match repo.fetch().and_then(|(_, text)| check(text)) {
+            Ok((cfg, text)) => {
+                storage::save_text(&data.config(), &text)?;
+                save_backup(data, &text);
+                tracing::info!("config downloaded from the config repo");
+                return Ok((cfg, secrets));
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = format!("{e:#}"),
+                    "cannot get the config from the config repo"
+                );
+                errors.push(format!("config repo: {e:#}"));
+            }
+        }
+    }
+
+    match read(data.config_backup()).and_then(check) {
+        Ok((cfg, _)) => {
+            tracing::warn!("using the last good config");
+            Ok((cfg, secrets))
+        }
+        Err(e) => {
+            errors.push(format!("config.last-good.json: {e:#}"));
+            bail!("no config can be used:\n{}", errors.join("\n"))
+        }
+    }
+}
+
+/// Keeps a copy of a config that passed the checks, for when no other config can be used.
+fn save_backup(data: &DataDir, text: &str) {
+    if let Err(e) = storage::save_text(&data.config_backup(), text) {
+        tracing::error!(error = format!("{e:#}"), "cannot save the backup config");
+    }
 }
 
 /// Returns the config if it has no errors.
@@ -174,6 +214,7 @@ pub fn run(
     let mut app = App {
         state_path: data.state(),
         config_path: data.config(),
+        backup_path: data.config_backup(),
         state,
         cfg,
         pc_name,
@@ -241,6 +282,7 @@ pub fn run(
 struct App {
     state_path: PathBuf,
     config_path: PathBuf,
+    backup_path: PathBuf,
     state: State,
     cfg: Config,
     /// From `secrets.json`. A new config must have this PC name.
@@ -297,6 +339,9 @@ impl App {
         if let Err(e) = storage::save_text(&self.config_path, &text) {
             tracing::error!(error = format!("{e:#}"), "cannot save the new config");
             return false;
+        }
+        if let Err(e) = storage::save_text(&self.backup_path, &text) {
+            tracing::error!(error = format!("{e:#}"), "cannot save the backup config");
         }
         let old_sha = self.state.config_sha.replace(sha.clone());
         self.save();

@@ -152,6 +152,8 @@ The service runs in session 0 and cannot show its own windows on the child's scr
 - If the check passes: save it as `config.json` (temp file, then rename) and use it at once. No restart is needed.
 - If the check fails: keep the old config, log the error, and tell the parents in Telegram.
 - If GitHub cannot be reached: keep using the local `config.json`. Time limits work without internet.
+- Each config that passes the checks is also saved as `config.last-good.json`.
+- At start, the service uses the first config that works: `config.json`, then the config repo, then `config.last-good.json`. Without a good config nothing is limited, so all three are tried.
 - After an update, tell the parents in Telegram, with the short commit SHA. Example: "PC-1: config updated (a1b2c3d)".
 - A config change does not reset today's used time or extra time. A new limit is used from the next check.
 - Log every update: old SHA, new SHA, and what changed.
