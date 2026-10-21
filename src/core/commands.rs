@@ -52,6 +52,8 @@ pub enum Out {
     Answer { callback_id: String, text: String },
     /// Show a message on the PC to a child who is signed in.
     NotifyPc { child_id: String, text: String },
+    /// Check the config repo now, and tell the parent `to` the result.
+    Reload { to: i64 },
 }
 
 fn send(to: i64, text: impl Into<String>) -> Out {
@@ -352,6 +354,7 @@ fn parent_command(
             out.extend(to_child(cfg, &child.id, &pc_text));
             out
         }
+        "/reload" => vec![Out::Reload { to: me }],
         "/status" => {
             let lines: Vec<String> = cfg
                 .children
@@ -383,12 +386,12 @@ fn parent_command(
         }
         _ if only_child.is_some() => vec![send(
             me,
-            "Commands:\n/status — time left today\n/give <minutes> — give extra time\n/take <minutes> — take time away\n/stop — end today's time now\n\nExample: /give 30",
+            "Commands:\n/status — time left today\n/give <minutes> — give extra time\n/take <minutes> — take time away\n/stop — end today's time now\n/reload — get a new config from GitHub now\n\nExample: /give 30",
         )],
         _ => vec![send(
             me,
             format!(
-                "Commands:\n/status — time for all children\n/give <name> <minutes> — give extra time\n/take <name> <minutes> — take time away\n/stop <name> — end today's time now\n\nExample: /give {}30",
+                "Commands:\n/status — time for all children\n/give <name> <minutes> — give extra time\n/take <name> <minutes> — take time away\n/stop <name> — end today's time now\n/reload — get a new config from GitHub now\n\nExample: /give {}30",
                 name_example(cfg)
             ),
         )],

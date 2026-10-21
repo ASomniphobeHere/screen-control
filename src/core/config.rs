@@ -266,7 +266,6 @@ const ALL_DAYS: [Weekday; 7] = [
 /// Local secrets. Only on this PC, never in the config repo.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)] // The GitHub fields are used by config updates (plan step 10).
 pub struct Secrets {
     pub pc_name: String,
     #[serde(default)]

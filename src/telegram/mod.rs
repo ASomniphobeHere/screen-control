@@ -17,7 +17,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const SEND_TRIES: u32 = 3;
 
 /// Starts both threads. Send `Out` messages to the returned sender.
-/// `Out::NotifyPc` is not a Telegram message and must not be sent here.
+/// `Out::NotifyPc` and `Out::Reload` are not Telegram messages and must not be sent here.
 pub fn start(token: &str, events: Sender<Event>) -> Result<Sender<Out>> {
     let api = Arc::new(Api::new(token)?);
     let (outbox, rx) = mpsc::channel();
@@ -105,7 +105,9 @@ fn send_one(api: &Api, out: &Out, events: &Sender<Event>) -> Result<()> {
             text,
         } => api.edit_message_text(*to, *message_id, text)?,
         Out::Answer { callback_id, text } => api.answer_callback_query(callback_id, text)?,
-        Out::NotifyPc { .. } => tracing::error!("NotifyPc sent to Telegram, ignored"),
+        Out::NotifyPc { .. } | Out::Reload { .. } => {
+            tracing::error!(out = ?out, "not a Telegram message, ignored")
+        }
     }
     Ok(())
 }

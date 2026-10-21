@@ -1,4 +1,5 @@
 mod app;
+mod config_sync;
 mod core;
 mod logging;
 mod service;
