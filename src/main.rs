@@ -1,6 +1,7 @@
 mod app;
 mod core;
 mod logging;
+mod service;
 mod storage;
 mod win;
 
@@ -15,14 +16,16 @@ use crate::core::config::Config;
 
 const USAGE: &str = "\
 Usage:
-  screen-control service                          run as a Windows service (started by Windows)
-  screen-control console [--data-dir DIR]         run in this terminal, for testing
-  screen-control check-config FILE [--pc-name NAME]  check a config file";
+  screen-control service [--data-dir DIR]            run as a Windows service (started by Windows)
+  screen-control console [--data-dir DIR]            run in this terminal, for testing
+  screen-control check-config FILE [--pc-name NAME]  check a config file
+
+The data folder is C:\\ProgramData\\ScreenTime unless --data-dir is given.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
-        Some("service") => run_service(),
+        Some("service") => run_service(&args[1..]),
         Some("console") => run_console(&args[1..]),
         Some("check-config") => check_config(&args[1..]),
         _ => {
@@ -51,18 +54,24 @@ fn option<'a>(args: &'a [String], name: &str) -> Result<Option<&'a str>> {
     }
 }
 
-fn run_service() -> Result<ExitCode> {
-    let data = DataDir(DataDir::default_path());
+fn data_dir(args: &[String]) -> Result<DataDir> {
+    Ok(DataDir(match option(args, "--data-dir")? {
+        Some(dir) => PathBuf::from(dir),
+        None => DataDir::default_path(),
+    }))
+}
+
+fn run_service(args: &[String]) -> Result<ExitCode> {
+    let data = data_dir(args)?;
     let _guard = logging::init_file(&data.logs())?;
-    bail!("service mode is not built yet (plan step 7)")
+    tracing::info!(data_dir = %data.0.display(), version = env!("CARGO_PKG_VERSION"), "starting as a service");
+    service::run(data)?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_console(args: &[String]) -> Result<ExitCode> {
     logging::init_console();
-    let data = DataDir(match option(args, "--data-dir")? {
-        Some(dir) => PathBuf::from(dir),
-        None => DataDir::default_path(),
-    });
+    let data = data_dir(args)?;
     tracing::info!(data_dir = %data.0.display(), "starting in console mode");
 
     let (cfg, _secrets) = app::load_checked(&data)?;

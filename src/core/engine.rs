@@ -141,9 +141,8 @@ impl Engine {
 
             let cs = state.child_mut(&child.id);
             // A new session started after the last tick, so the time before it was not used.
-            if seen.contains(&s.id) {
-                cs.used_ms += delta_ms;
-            }
+            let counted_ms = if seen.contains(&s.id) { delta_ms } else { 0 };
+            cs.used_ms += counted_ms;
 
             // A missing limit cannot pass the config checks. If it happens anyway, allow nothing.
             let limit_ms = child.limits.for_day(now.weekday).unwrap_or(0) as i64 * 60_000;
@@ -163,7 +162,7 @@ impl Engine {
             tracing::info!(
                 session = s.id,
                 child = %child.id,
-                delta_ms,
+                counted_ms,
                 used_s = cs.used_ms / 1000,
                 extra_s = cs.extra_ms / 1000,
                 left_s = left_ms / 1000,

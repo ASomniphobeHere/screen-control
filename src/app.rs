@@ -24,7 +24,6 @@ const MESSAGE_TITLE: &str = "Screen time";
 pub enum Event {
     Stop,
     /// Logon, logoff, lock or unlock. Causes a tick at once.
-    #[allow(dead_code)] // Sent by the service (plan step 7).
     SessionChanged,
 }
 

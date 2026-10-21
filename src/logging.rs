@@ -24,6 +24,7 @@ pub fn init_console() {
 
 /// Keep the returned guard until the program ends, or the last lines are lost.
 pub fn init_file(dir: &Path) -> Result<WorkerGuard> {
+    std::fs::create_dir_all(dir)?;
     let appender = Builder::new()
         .rotation(Rotation::DAILY)
         .filename_prefix("screen-control")

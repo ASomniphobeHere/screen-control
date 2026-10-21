@@ -13,3 +13,4 @@ tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_RemoteDesktop", "Win32_System_WindowsProgramming", "Win32_UI_WindowsAndMessaging"] }
+windows-service = "0.8.1"
