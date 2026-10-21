@@ -70,7 +70,7 @@ Each step ends with something that works and can be tested.
   - Security descriptor from SDDL: SYSTEM full access, interactive users read only.
   - For each client, `GetNamedPipeClientSessionId` gives the session. Only one client per session; a newer one replaces the older.
 - The main loop sends `(session, message)` to the pipe thread through a channel. The pipe thread writes to the right client and drops clients that fail.
-- A debug command `screen-control helper --print` connects and prints each message. It is used to test this step before any windows exist.
+- A debug command `screen-control helper --print` connects and prints each message. It is used to test this step before any windows exist. Since step 7, it is only in debug builds.
 
 **Done when:** in the VM, `helper --print` in `testkid`'s session prints `status` every tick, and a `warn` at the warnings.
 
@@ -128,19 +128,40 @@ Each step ends with something that works and can be tested.
 
 ### Step 7: Install and test
 
-- The install script needs no change: the helper is the same `.exe`.
-- Test in the VM, then on the real PCs:
+- The install script needs no change: the helper is the same `.exe`. Users can only read and run the files in the install folder (checked in the VM: `BUILTIN\Users:(RX)`), so a child cannot change or replace the `.exe`.
+- Fixes found in step 6:
+  - **Early tick.** When a child's time reaches a warning point or zero before the next 20-second tick, a tick runs at that moment. So time-up comes when the timer shows 0:00, not up to 20 seconds later. The engine still counts the real time between ticks.
+  - **Wait for helpers after a start.** Before the first tick, the service waits up to 3 seconds for the helpers of signed-in children to connect (after a restart they connect again in about 2 seconds). So a warning on the first tick goes to the helper, not to a message box.
+  - **Fake helpers.** The service checks the program of each pipe client (`GetNamedPipeClientProcessId`, `QueryFullProcessImageNameW`). Only a client that runs the service's own `.exe` is used. Others are disconnected and logged (at most once a minute). `helper --print` is only in debug builds, because it runs the real `.exe` and could take the place of the helper.
+  - **Slow helper.** A message is written to the helper only if the write can end before the service stops waiting for it. If not, the message goes to a message box and the helper is dropped (it connects again). So a message never shows both ways.
+- Known limit: a child can stop the helper, or run a copy of the `.exe` that holds the helper's one-copy lock. Then no helper connects and the service uses message boxes. The limits do not depend on the helper.
+- Test in the VM, then on the real PCs. "(VM)" means tested in the VM.
 
-- [ ] The helper starts at sign-in and after it is killed.
-- [ ] No console window shows.
-- [ ] The timer counts down and changes colour at 10 and 5 minutes.
-- [ ] The timer does not take focus from a game or a text field.
-- [ ] Warnings show at 10, 5 and 1 minute and close by themselves.
-- [ ] Time-up shows a countdown, then the sign-out happens.
-- [ ] `/give` in Telegram shows "… gave you … minutes" on the PC.
-- [ ] With the helper killed, the plain message boxes still show.
-- [ ] Sharp text at 100% and 150% display scaling.
-- [ ] A child cannot use the pipe to change anything: messages only go from the service to the helper.
+- [x] The helper starts at sign-in and after it is killed. (VM)
+- [x] No console window shows. (VM)
+- [x] The timer counts down and changes colour at 10 and 5 minutes. (VM)
+- [x] The timer does not take focus from a game or a text field. (VM, text field in Notepad; games only on the real PCs)
+- [x] Warnings show at 10, 5 and 1 minute and close by themselves. (VM)
+- [x] Time-up shows a countdown, then the sign-out happens. (VM; with the early tick, time-up comes at 0:00)
+- [ ] `/give` in Telegram shows "… gave you … minutes" on the PC. Not tested in the VM, as it needs the parents' Telegram. Test on the real PCs.
+- [x] With the helper killed, the plain message boxes still show. (VM)
+- [ ] Sharp text at 100% and 150% display scaling. Sharp at 100% and 125% in the VM (VM); the VM has no 150%. Test 150% on the real PCs.
+- [x] A child cannot use the pipe to change anything: messages only go from the service to the helper. (VM: as `testkid`, a connection to write is denied, a read-only connection cannot write, making a pipe with the same name is denied, and a PowerShell client and a copy of the `.exe` in `%LOCALAPPDATA%` are disconnected while the real helper keeps getting its messages)
+- [x] After a service restart, a warning on the first tick goes to the helper. (VM: helpers connected after 1.7 s)
+
+#### On the real PCs
+
+After the install on each brother's PC:
+
+- [ ] The timer shows after sign-in, in a corner, with the right time left.
+- [ ] Sharp text at the PC's display scaling (150% or more, if used).
+- [ ] The timer stays on top of a game in a window or borderless full screen, and does not take focus while playing or typing.
+- [ ] In a game in exclusive full screen, see what shows at a warning (known limit: maybe nothing until the game is left).
+- [ ] `/give 5` and `/take 5` in Telegram show "… gave you …" and "… took …" on the PC, and the timer changes.
+- [ ] At time-up, the window says how to ask for more time, and `/more 30` from the child reaches the parents.
+- [ ] Warnings at 10, 5 and 1 minute, then time-up at 0:00 and the sign-out.
+- [ ] With the helper killed in Task Manager, a message box shows at the next warning, and the helper is back within about 20 seconds.
+- [ ] The service log has no "client is not this program" lines. They would mean a fake helper was tried.
 
 ## Order and size
 
