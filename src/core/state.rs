@@ -1,4 +1,4 @@
-//! Saved state: used time, extra time and open requests.
+//! Saved state: used time, extra time, passes and open requests.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,6 +18,9 @@ pub struct State {
     /// By child ID.
     #[serde(default)]
     pub children: BTreeMap<String, ChildState>,
+    /// Extra time after hours, by child ID. Not reset at a new day.
+    #[serde(default)]
+    pub passes: BTreeMap<String, Pass>,
     #[serde(default)]
     pub requests: Vec<Request>,
     /// Makes request IDs. Not reset at a new day.
@@ -35,6 +38,21 @@ pub struct ChildState {
     /// Warning thresholds (in minutes) already shown.
     #[serde(default)]
     pub warned: BTreeSet<u32>,
+}
+
+/// Extra time given when the allowed hours end before it would run out. It runs on the clock.
+/// While it is active, the budget and the allowed hours do not apply.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pass {
+    pub start_utc: DateTime<Utc>,
+    pub end_utc: DateTime<Utc>,
+}
+
+impl Pass {
+    /// Active while start <= now < end. So a clock put back before the start ends it too.
+    pub fn is_active(&self, utc: DateTime<Utc>) -> bool {
+        self.start_utc <= utc && utc < self.end_utc
+    }
 }
 
 /// An extra time request from a child, waiting for a parent.
@@ -67,6 +85,24 @@ impl State {
         true
     }
 
+    pub fn active_pass(&self, child_id: &str, utc: DateTime<Utc>) -> Option<&Pass> {
+        self.passes.get(child_id).filter(|p| p.is_active(utc))
+    }
+
+    /// Removes passes that are not active. Returns the IDs of their children.
+    pub fn drop_ended_passes(&mut self, utc: DateTime<Utc>) -> Vec<String> {
+        let ended: Vec<String> = self
+            .passes
+            .iter()
+            .filter(|(_, p)| !p.is_active(utc))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ended {
+            self.passes.remove(id);
+        }
+        ended
+    }
+
     pub fn child_mut(&mut self, child_id: &str) -> &mut ChildState {
         self.children.entry(child_id.to_string()).or_default()
     }
@@ -75,6 +111,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeDelta, TimeZone};
 
     fn date(d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 10, d).unwrap()
@@ -115,5 +152,40 @@ mod tests {
         let state: State = serde_json::from_str(r#"{ "date": "2026-10-20" }"#).unwrap();
         assert_eq!(state.date, Some(date(20)));
         assert!(state.children.is_empty());
+        assert!(state.passes.is_empty());
+    }
+
+    fn pass(start_min: i64, end_min: i64) -> Pass {
+        let base = Utc.with_ymd_and_hms(2026, 10, 20, 18, 0, 0).unwrap();
+        Pass {
+            start_utc: base + TimeDelta::minutes(start_min),
+            end_utc: base + TimeDelta::minutes(end_min),
+        }
+    }
+
+    #[test]
+    fn pass_is_active_from_start_to_end() {
+        let p = pass(0, 30);
+        let at = |m| p.start_utc + TimeDelta::minutes(m);
+        assert!(!p.is_active(at(-1)));
+        assert!(p.is_active(at(0)));
+        assert!(p.is_active(at(29)));
+        assert!(!p.is_active(at(30)));
+    }
+
+    #[test]
+    fn roll_day_keeps_passes_and_ended_ones_are_dropped() {
+        let mut state = State::default();
+        state.roll_day(date(20));
+        state.passes.insert("janis".into(), pass(0, 30));
+        state.passes.insert("peteris".into(), pass(0, 90));
+        state.roll_day(date(21));
+        assert_eq!(state.passes.len(), 2);
+
+        let now = pass(45, 45).start_utc;
+        assert!(state.active_pass("janis", now).is_none());
+        assert!(state.active_pass("peteris", now).is_some());
+        assert_eq!(state.drop_ended_passes(now), ["janis"]);
+        assert_eq!(state.passes.keys().collect::<Vec<_>>(), ["peteris"]);
     }
 }

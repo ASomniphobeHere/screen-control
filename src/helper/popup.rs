@@ -183,6 +183,7 @@ pub fn warn_text(name: Option<&str>, reason: Reason) -> String {
     let why = match reason {
         Reason::Budget => "your screen time for today ends soon.",
         Reason::Hours => "the allowed hours end soon.",
+        Reason::Extra => "your extra time ends soon.",
     };
     format!("{} Save what you are doing.", address(name, why))
 }
@@ -195,6 +196,7 @@ pub fn time_up_text(name: Option<&str>, reason: Reason, can_ask: bool) -> String
     let why = match reason {
         Reason::Budget => "your screen time for today is used up.",
         Reason::Hours => "screen time is not allowed at this hour.",
+        Reason::Extra => "your extra time is over.",
     };
     address(name, why)
 }

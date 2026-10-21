@@ -8,6 +8,8 @@ pub const MAX_CLOCK_BACK: TimeDelta = TimeDelta::hours(48);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalNow {
+    /// The UTC time this was made from.
+    pub utc: DateTime<Utc>,
     pub date: NaiveDate,
     pub weekday: Weekday,
     /// Minutes after midnight.
@@ -29,6 +31,7 @@ pub fn local_now(utc: DateTime<Utc>, offset_minutes: i32) -> LocalNow {
         FixedOffset::east_opt(offset_minutes * 60).unwrap_or(FixedOffset::east_opt(0).unwrap());
     let local = utc.with_timezone(&offset);
     LocalNow {
+        utc,
         date: local.date_naive(),
         weekday: local.weekday(),
         minute: local.hour() * 60 + local.minute(),

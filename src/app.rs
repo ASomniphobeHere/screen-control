@@ -334,6 +334,7 @@ impl Notice {
             Reason::Hours => {
                 format!("{name}, screen time ends in {n} {unit}: allowed hours are almost over.")
             }
+            Reason::Extra => format!("{name}, your extra time ends in {n} {unit}."),
         };
         Notice {
             message: Message::Warn {
@@ -348,6 +349,7 @@ impl Notice {
         let why = match reason {
             Reason::Budget => "your screen time for today is used up",
             Reason::Hours => "screen time is not allowed at this hour",
+            Reason::Extra => "your extra time is over",
         };
         let mut text = format!("{name}, {why}.\n\nYou will be signed out in {grace_s} seconds.");
         if can_ask {
@@ -637,7 +639,8 @@ impl App {
                     .get(&child.id)
                     .cloned()
                     .unwrap_or_default();
-                engine::until_next_point(engine::time_left(child, &cs, &now).left_ms)
+                let pass = self.state.passes.get(&child.id);
+                engine::until_next_point(engine::time_left(child, &cs, pass, &now).left_ms)
             })
             .min()
             .filter(|&d| d < TICK)
@@ -693,7 +696,7 @@ impl App {
                 Some(cs) if self.state.date == Some(now.date) => cs.clone(),
                 _ => Default::default(),
             };
-            let t = engine::time_left(child, &cs, &now);
+            let t = engine::time_left(child, &cs, self.state.passes.get(&child.id), &now);
             helpers.send(
                 s.id,
                 Message::Status {
@@ -753,7 +756,7 @@ impl App {
                 let child = self.cfg.children.iter().find(|c| &c.id == child_id);
                 let can_ask =
                     self.telegram.is_some() && child.is_some_and(|c| c.telegram_user_id.is_some());
-                let can_ask = *reason == Reason::Budget && can_ask;
+                let can_ask = matches!(reason, Reason::Budget | Reason::Extra) && can_ask;
                 self.show(
                     *session,
                     Notice::time_up(&name(child_id), *reason, *grace_s, can_ask),

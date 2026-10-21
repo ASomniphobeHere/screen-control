@@ -4,8 +4,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use super::config::{Child, Config, Parent};
 use super::day;
-use super::engine::budget_left_ms;
-use super::state::{ParentMessage, Request, State};
+use super::engine::{budget_left_ms, hours_left_ms};
+use super::state::{ParentMessage, Pass, Request, State};
 
 /// Requests with no answer are removed after this time.
 pub const REQUEST_TIMEOUT: TimeDelta = TimeDelta::minutes(30);
@@ -100,7 +100,7 @@ pub fn handle(cfg: &Config, state: &mut State, now: DateTime<Utc>, input: Input)
                 text: text.to_string(),
             };
             match cfg.parents.iter().find(|p| p.telegram_user_id == from) {
-                Some(parent) => button(cfg, state, parent, data, answer),
+                Some(parent) => button(cfg, state, now, parent, data, answer),
                 None => {
                     tracing::warn!(
                         from,
@@ -199,9 +199,12 @@ fn child_command(
                 created_utc: now,
                 parent_messages: Vec::new(),
             };
-            let left = time_left(cfg, state, now, child);
+            let left = match pass_end(cfg, state, now, child) {
+                Some(end) => format!("can use it until {end}"),
+                None => format!("{} left today", time_left(cfg, state, now, child)),
+            };
             let text = format!(
-                "🙋 {} asks for {minutes} min on {} ({left} left today).",
+                "🙋 {} asks for {minutes} min on {} ({left}).",
                 child.name, cfg.pc_name
             );
             let mut buttons = vec![Button {
@@ -237,10 +240,13 @@ fn child_command(
             ));
             out
         }
-        "/status" => vec![send(
-            me,
-            format!("You have {} left today.", time_left(cfg, state, now, child)),
-        )],
+        "/status" => {
+            let text = match pass_end(cfg, state, now, child) {
+                Some(end) => format!("You can use the PC until {end}."),
+                None => format!("You have {} left today.", time_left(cfg, state, now, child)),
+            };
+            vec![send(me, text)]
+        }
         _ => vec![send(
             me,
             "Commands:\n/more <minutes> — ask for more time, for example /more 30\n/status — your time left today",
@@ -297,10 +303,26 @@ fn parent_command(
                 }
             };
             let give = command == "/give";
-            let ms = minutes as i64 * 60_000;
-            state.child_mut(&child.id).extra_ms += if give { ms } else { -ms };
-            tracing::info!(parent = %parent.name, child = %child.id, minutes, give, "extra time changed");
-            let left = time_left(cfg, state, now, child);
+            let granted = if give {
+                grant(cfg, state, now, child, minutes)
+            } else {
+                take(state, now, child, minutes)
+            };
+            tracing::info!(parent = %parent.name, child = %child.id, minutes, give, granted = ?granted, "extra time changed");
+            // For the parent who sent it, and for the others.
+            let (left, left_short) = match granted {
+                Granted::Budget => {
+                    let left = time_left(cfg, state, now, child);
+                    (
+                        format!("{} has {left} left today.", child.name),
+                        format!("{left} left today."),
+                    )
+                }
+                Granted::Pass(end) => {
+                    let until = until_text(cfg, child, end);
+                    (until.clone(), until)
+                }
+            };
             let (verb, pc_text) = if give {
                 (
                     "gave",
@@ -312,15 +334,12 @@ fn parent_command(
                     format!("{} took {minutes} minutes of your time.", parent.name),
                 )
             };
-            let mut out = vec![send(
-                me,
-                format!("Done. {} has {left} left today.", child.name),
-            )];
+            let mut out = vec![send(me, format!("Done. {left}"))];
             out.extend(to_other_parents(
                 cfg,
                 me,
                 format!(
-                    "{} {verb} {} {minutes} min. {left} left today.",
+                    "{} {verb} {} {minutes} min. {left_short}",
                     parent.name, child.name
                 ),
             ));
@@ -350,6 +369,7 @@ fn parent_command(
                     )];
                 }
             };
+            state.passes.remove(&child.id);
             let weekday = local_weekday(cfg, state, now);
             let cs = state.child_mut(&child.id);
             // Extra time below zero, so that exactly nothing is left.
@@ -375,12 +395,12 @@ fn parent_command(
                 .iter()
                 .map(|c| {
                     let cs = state.children.get(&c.id).cloned().unwrap_or_default();
-                    let mut line = format!(
-                        "{}: {} left (used {}",
-                        c.name,
-                        time_left(cfg, state, now, c),
-                        format_ms(cs.used_ms as i64)
-                    );
+                    let left = match pass_end(cfg, state, now, c) {
+                        Some(end) => format!("until {end}"),
+                        None => format!("{} left", time_left(cfg, state, now, c)),
+                    };
+                    let mut line =
+                        format!("{}: {left} (used {}", c.name, format_ms(cs.used_ms as i64));
                     if cs.extra_ms != 0 {
                         line += &format!(
                             ", extra {}{}",
@@ -415,6 +435,7 @@ fn parent_command(
 fn button(
     cfg: &Config,
     state: &mut State,
+    now: DateTime<Utc>,
     parent: &Parent,
     data: &str,
     answer: impl Fn(&str) -> Out,
@@ -429,17 +450,23 @@ fn button(
 
     match (action, parts.next().and_then(|m| m.parse::<u32>().ok())) {
         ("approve", Some(minutes)) if (1..=MAX_MINUTES).contains(&minutes) => {
-            state.child_mut(&request.child_id).extra_ms += minutes as i64 * 60_000;
-            tracing::info!(request = %id, parent = %parent.name, child = %request.child_id, minutes, "request approved");
+            let child = cfg.children.iter().find(|c| c.id == request.child_id);
+            let granted = match child {
+                Some(child) => grant(cfg, state, now, child, minutes),
+                // Not in the config any more: nothing uses the time.
+                None => Granted::Budget,
+            };
+            tracing::info!(request = %id, parent = %parent.name, child = %request.child_id, minutes, granted = ?granted, "request approved");
             let pc_text = format!("{} gave you {minutes} more minutes.", parent.name);
+            let mut text = format!(
+                "✅ {name} asked for {} min. {} gave {minutes} min.",
+                request.minutes, parent.name
+            );
+            if let (Granted::Pass(end), Some(child)) = (granted, child) {
+                text += &format!(" {}", until_text(cfg, child, end));
+            }
             let mut out = vec![answer("Done.")];
-            out.extend(edit_request(
-                &request,
-                format!(
-                    "✅ {name} asked for {} min. {} gave {minutes} min.",
-                    request.minutes, parent.name
-                ),
-            ));
+            out.extend(edit_request(&request, text));
             out.extend(to_child(cfg, &request.child_id, &pc_text));
             out.push(Out::NotifyPc {
                 child_id: request.child_id.clone(),
@@ -521,6 +548,86 @@ fn local_weekday(cfg: &Config, state: &State, now: DateTime<Utc>) -> chrono::Wee
         cfg.utc_offset_minutes,
     )
     .weekday
+}
+
+/// What giving or taking time changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Granted {
+    /// Today's extra time.
+    Budget,
+    /// A pass. Its end.
+    Pass(DateTime<Utc>),
+}
+
+/// Gives extra time, for `/give` and an approved request. An active pass ends later. If the
+/// allowed hours end before the time would run out, it makes a pass from now. Otherwise the time
+/// is added to today's extra time.
+fn grant(
+    cfg: &Config,
+    state: &mut State,
+    now: DateTime<Utc>,
+    child: &Child,
+    minutes: u32,
+) -> Granted {
+    let utc = day::effective_utc(now, state.last_seen_utc);
+    let length = TimeDelta::minutes(minutes as i64);
+    if let Some(pass) = state.passes.get_mut(&child.id).filter(|p| p.is_active(utc)) {
+        pass.end_utc += length;
+        return Granted::Pass(pass.end_utc);
+    }
+    let local = day::local_now(utc, cfg.utc_offset_minutes);
+    match hours_left_ms(child, &local) {
+        Some(hours_left) if hours_left < length.num_milliseconds() => {
+            let pass = Pass {
+                start_utc: utc,
+                end_utc: utc + length,
+            };
+            state.passes.insert(child.id.clone(), pass);
+            Granted::Pass(utc + length)
+        }
+        _ => {
+            state.child_mut(&child.id).extra_ms += length.num_milliseconds();
+            Granted::Budget
+        }
+    }
+}
+
+/// Takes time away: from the end of an active pass, or else from today's extra time.
+fn take(state: &mut State, now: DateTime<Utc>, child: &Child, minutes: u32) -> Granted {
+    let utc = day::effective_utc(now, state.last_seen_utc);
+    let length = TimeDelta::minutes(minutes as i64);
+    if let Some(pass) = state.passes.get_mut(&child.id).filter(|p| p.is_active(utc)) {
+        pass.end_utc -= length;
+        if pass.is_active(utc) {
+            return Granted::Pass(pass.end_utc);
+        }
+        // Ended. The next tick removes it.
+        return Granted::Budget;
+    }
+    state.child_mut(&child.id).extra_ms -= length.num_milliseconds();
+    Granted::Budget
+}
+
+/// "Jānis can use the PC until 22:10 (outside the allowed hours)."
+fn until_text(cfg: &Config, child: &Child, end: DateTime<Utc>) -> String {
+    format!(
+        "{} can use the PC until {} (outside the allowed hours).",
+        child.name,
+        clock(cfg, end)
+    )
+}
+
+/// The end of the child's active pass as local time, like `22:10`.
+fn pass_end(cfg: &Config, state: &State, now: DateTime<Utc>, child: &Child) -> Option<String> {
+    let utc = day::effective_utc(now, state.last_seen_utc);
+    let pass = state.active_pass(&child.id, utc)?;
+    Some(clock(cfg, pass.end_utc))
+}
+
+/// Local time like `22:10`, with the offset in the config.
+fn clock(cfg: &Config, utc: DateTime<Utc>) -> String {
+    let minute = day::local_now(utc, cfg.utc_offset_minutes).minute;
+    format!("{:02}:{:02}", minute / 60, minute % 60)
 }
 
 fn time_left(cfg: &Config, state: &State, now: DateTime<Utc>, child: &Child) -> String {
@@ -883,6 +990,163 @@ mod tests {
             ["Your request for more time expired. You can ask again."]
         );
         assert!(state.requests.is_empty());
+    }
+
+    /// Tuesday 2026-10-20, local time (UTC+3). Jānis may use the PC 08:00-21:00.
+    fn local(h: u32, m: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 20, h, m, 0).unwrap() - TimeDelta::hours(3)
+    }
+
+    fn text_at(
+        cfg: &Config,
+        state: &mut State,
+        at: DateTime<Utc>,
+        from: i64,
+        text: &str,
+    ) -> Vec<Out> {
+        handle(cfg, state, at, Input::Text { from, text })
+    }
+
+    #[test]
+    fn give_after_hours_makes_a_pass() {
+        let (cfg, mut state) = (good(), State::default());
+        let out = text_at(&cfg, &mut state, local(21, 40), MOM, "/give janis 30");
+        assert_eq!(
+            texts_to(&out, MOM),
+            ["Done. Jānis can use the PC until 22:10 (outside the allowed hours)."]
+        );
+        assert_eq!(
+            texts_to(&out, DAD),
+            [
+                "Mom gave Jānis 30 min. Jānis can use the PC until 22:10 (outside the allowed hours)."
+            ]
+        );
+        assert_eq!(texts_to(&out, JANIS), ["Mom gave you 30 more minutes."]);
+        assert_eq!(
+            state.passes["janis"],
+            Pass {
+                start_utc: local(21, 40),
+                end_utc: local(22, 10),
+            }
+        );
+        assert_eq!(state.child_mut("janis").extra_ms, 0);
+
+        let out = text_at(&cfg, &mut state, local(21, 45), DAD, "/give janis 15");
+        assert_eq!(
+            texts_to(&out, DAD),
+            ["Done. Jānis can use the PC until 22:25 (outside the allowed hours)."]
+        );
+        let out = text_at(&cfg, &mut state, local(21, 50), MOM, "/take janis 10");
+        assert_eq!(
+            texts_to(&out, MOM),
+            ["Done. Jānis can use the PC until 22:15 (outside the allowed hours)."]
+        );
+        assert_eq!(state.passes["janis"].start_utc, local(21, 40));
+        assert_eq!(state.child_mut("janis").extra_ms, 0);
+
+        let out = text_at(&cfg, &mut state, local(21, 50), MOM, "/status");
+        assert_eq!(
+            texts_to(&out, MOM),
+            ["PC-1:\nJānis: until 22:15 (used 0 min)\nPēteris: 30 min left (used 0 min)"]
+        );
+        let out = text_at(&cfg, &mut state, local(21, 50), JANIS, "/status");
+        assert_eq!(texts_to(&out, JANIS), ["You can use the PC until 22:15."]);
+    }
+
+    #[test]
+    fn give_just_before_the_hours_end_makes_a_pass() {
+        let (cfg, mut state) = (good(), State::default());
+        let out = text_at(&cfg, &mut state, local(20, 55), MOM, "/give janis 30");
+        assert_eq!(
+            texts_to(&out, MOM),
+            ["Done. Jānis can use the PC until 21:25 (outside the allowed hours)."]
+        );
+        assert_eq!(state.passes["janis"].end_utc, local(21, 25));
+    }
+
+    #[test]
+    fn give_when_the_hours_end_later_adds_to_the_budget() {
+        // At 20:30 the hours end in 30 minutes: not less than the 30 given.
+        for at in [local(20, 0), local(20, 30)] {
+            let (cfg, mut state) = (good(), State::default());
+            let out = text_at(&cfg, &mut state, at, MOM, "/give janis 30");
+            assert_eq!(
+                texts_to(&out, MOM),
+                ["Done. Jānis has 1 h 30 min left today."],
+                "{at}"
+            );
+            assert!(state.passes.is_empty());
+            assert_eq!(state.child_mut("janis").extra_ms, 30 * 60_000);
+        }
+    }
+
+    #[test]
+    fn child_with_no_allowed_hours_never_gets_a_pass() {
+        let (cfg, mut state) = (good(), State::default());
+        text_at(&cfg, &mut state, local(23, 50), MOM, "/give peteris 30");
+        assert!(state.passes.is_empty());
+        assert_eq!(state.child_mut("peteris").extra_ms, 30 * 60_000);
+    }
+
+    #[test]
+    fn approve_after_hours_makes_a_pass() {
+        let (cfg, mut state) = (good(), State::default());
+        let id = ask(&cfg, &mut state, 30);
+        let data = format!("approve:{id}:30");
+        let out = handle(
+            &cfg,
+            &mut state,
+            local(21, 40),
+            Input::Button {
+                from: DAD,
+                callback_id: "cb",
+                data: &data,
+            },
+        );
+        assert_eq!(
+            texts_to(&out, MOM),
+            [
+                "✅ Jānis asked for 30 min. Dad gave 30 min. Jānis can use the PC until 22:10 (outside the allowed hours)."
+            ]
+        );
+        assert_eq!(texts_to(&out, JANIS), ["Dad gave you 30 more minutes."]);
+        assert_eq!(state.passes["janis"].end_utc, local(22, 10));
+        assert_eq!(state.child_mut("janis").extra_ms, 0);
+    }
+
+    #[test]
+    fn take_more_than_the_pass_ends_it() {
+        let (cfg, mut state) = (good(), State::default());
+        text_at(&cfg, &mut state, local(21, 40), MOM, "/give janis 30");
+        let out = text_at(&cfg, &mut state, local(21, 45), MOM, "/take janis 40");
+        assert_eq!(texts_to(&out, MOM), ["Done. Jānis has 1 h left today."]);
+        assert!(state.active_pass("janis", local(21, 45)).is_none());
+        assert_eq!(state.child_mut("janis").extra_ms, 0);
+    }
+
+    #[test]
+    fn stop_ends_a_pass() {
+        let (cfg, mut state) = (good(), State::default());
+        text_at(&cfg, &mut state, local(21, 40), MOM, "/give janis 30");
+        text_at(&cfg, &mut state, local(21, 41), MOM, "/stop janis");
+        assert!(state.passes.is_empty());
+        let now = day::local_now(local(21, 41), cfg.utc_offset_minutes);
+        let cs = state.child_mut("janis").clone();
+        let left = crate::core::engine::time_left(&cfg.children[0], &cs, None, &now);
+        assert_eq!(left.left_ms, 0);
+    }
+
+    #[test]
+    fn pass_goes_on_past_midnight() {
+        let (cfg, mut state) = (good(), State::default());
+        text_at(&cfg, &mut state, local(23, 50), MOM, "/give janis 30");
+        let after_midnight = local(23, 50) + TimeDelta::minutes(20);
+        let out = text_at(&cfg, &mut state, after_midnight, JANIS, "/status");
+        assert_eq!(texts_to(&out, JANIS), ["You can use the PC until 00:20."]);
+        assert_eq!(
+            state.date,
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 10, 21).unwrap())
+        );
     }
 
     #[test]

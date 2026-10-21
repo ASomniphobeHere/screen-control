@@ -10,7 +10,7 @@ use chrono::Weekday;
 
 use super::config::{Child, Config};
 use super::day::{self, LocalNow};
-use super::state::{ChildState, State};
+use super::state::{ChildState, Pass, State};
 
 /// Warnings are shown when this many minutes are left.
 pub const WARN_MINUTES: [u32; 3] = [10, 5, 1];
@@ -35,25 +35,51 @@ pub fn budget_left_ms(child: &Child, cs: &ChildState, weekday: Weekday) -> i64 {
 /// What `time_left` gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeLeft {
-    /// Until the budget is used up or the allowed hours end, whichever comes first. Can be below zero.
+    /// Until the budget is used up or the allowed hours end, whichever comes first, or until the
+    /// end of an active pass. Can be below zero.
     pub left_ms: i64,
-    /// Today's limit plus extra time. Can be below zero after `/take`.
+    /// Today's limit plus extra time, or the length of the pass. Can be below zero after `/take`.
     pub limit_ms: i64,
     /// What ends the time first.
     pub reason: Reason,
 }
 
-/// The time left now, from the budget and the allowed hours.
-pub fn time_left(child: &Child, cs: &ChildState, now: &LocalNow) -> TimeLeft {
-    let budget_left = budget_left_ms(child, cs, now.weekday);
-    let hours_left = child.allowed_hours.map(|range| {
+/// Time until the allowed hours end: 0 outside them, `None` for a child with no allowed hours.
+pub fn hours_left_ms(child: &Child, now: &LocalNow) -> Option<i64> {
+    child.allowed_hours.map(|range| {
         if range.contains(now.minute) {
             range.minutes_until_end(now.minute) as i64 * 60_000 - now.second as i64 * 1000
         } else {
             0
         }
-    });
-    let (left_ms, reason) = match hours_left {
+    })
+}
+
+/// The time left now. With an active pass, until its end. Otherwise from the budget and the
+/// allowed hours. A pass that has just ended (and is not removed yet) still gives the reason
+/// `Extra` when no other time is left, so the time-up says that the extra time is over.
+pub fn time_left(child: &Child, cs: &ChildState, pass: Option<&Pass>, now: &LocalNow) -> TimeLeft {
+    let normal = time_left_without_pass(child, cs, now);
+    let Some(pass) = pass else {
+        return normal;
+    };
+    let left_ms = if pass.is_active(now.utc) {
+        (pass.end_utc - now.utc).num_milliseconds()
+    } else if pass.start_utc <= now.utc && normal.left_ms <= 0 {
+        normal.left_ms
+    } else {
+        return normal;
+    };
+    TimeLeft {
+        left_ms,
+        limit_ms: (pass.end_utc - pass.start_utc).num_milliseconds(),
+        reason: Reason::Extra,
+    }
+}
+
+fn time_left_without_pass(child: &Child, cs: &ChildState, now: &LocalNow) -> TimeLeft {
+    let budget_left = budget_left_ms(child, cs, now.weekday);
+    let (left_ms, reason) = match hours_left_ms(child, now) {
         Some(h) if h < budget_left => (h, Reason::Hours),
         _ => (budget_left, Reason::Budget),
     };
@@ -96,6 +122,8 @@ pub enum Reason {
     Budget,
     /// Outside the allowed hours.
     Hours,
+    /// Extra time after hours (a pass) ends.
+    Extra,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +227,7 @@ impl Engine {
                 continue;
             }
 
+            let pass = state.passes.get(&child.id).cloned();
             let cs = state.child_mut(&child.id);
             // A new session started after the last tick, so the time before it was not used.
             let counted_ms = if seen.contains(&s.id) { delta_ms } else { 0 };
@@ -206,7 +235,7 @@ impl Engine {
 
             let TimeLeft {
                 left_ms, reason, ..
-            } = time_left(child, cs, &now);
+            } = time_left(child, cs, pass.as_ref(), &now);
 
             tracing::info!(
                 session = s.id,
@@ -285,6 +314,11 @@ impl Engine {
             }
         }
 
+        // After the sessions, so a pass that just ended still gives its time-up.
+        for child_id in state.drop_ended_passes(utc) {
+            tracing::info!(child = %child_id, "extra time after hours ended");
+        }
+
         actions
     }
 }
@@ -341,6 +375,31 @@ mod tests {
 
         fn used_s(&mut self, child: &str) -> u64 {
             self.state.child_mut(child).used_ms / 1000
+        }
+
+        /// A pass for Jānis from now, as `/give` makes it after hours.
+        fn give_pass(&mut self, minutes: i64) {
+            let pass = Pass {
+                start_utc: self.now,
+                end_utc: self.now + chrono::TimeDelta::minutes(minutes),
+            };
+            self.state.passes.insert("janis".into(), pass);
+        }
+
+        fn janis_left(&self) -> TimeLeft {
+            let now = day::local_now(self.now, self.cfg.utc_offset_minutes);
+            let cs = self
+                .state
+                .children
+                .get("janis")
+                .cloned()
+                .unwrap_or_default();
+            time_left(
+                &self.cfg.children[0],
+                &cs,
+                self.state.passes.get("janis"),
+                &now,
+            )
         }
     }
 
@@ -560,7 +619,7 @@ mod tests {
 
         // 60 + 15 - 20 = 55 minutes of budget, hours end much later.
         assert_eq!(
-            time_left(janis, &cs, &local(at(12, 0, 0))),
+            time_left(janis, &cs, None, &local(at(12, 0, 0))),
             TimeLeft {
                 left_ms: 55 * 60_000,
                 limit_ms: 75 * 60_000,
@@ -569,7 +628,7 @@ mod tests {
         );
         // Allowed hours end at 21:00, in 10 minutes and 30 seconds.
         assert_eq!(
-            time_left(janis, &cs, &local(at(20, 49, 30))),
+            time_left(janis, &cs, None, &local(at(20, 49, 30))),
             TimeLeft {
                 left_ms: 10 * 60_000 + 30_000,
                 limit_ms: 75 * 60_000,
@@ -619,5 +678,158 @@ mod tests {
         assert_eq!(until_next_point(30_000), Some(Duration::from_secs(30)));
         assert_eq!(until_next_point(0), None);
         assert_eq!(until_next_point(-5_000), None);
+    }
+
+    #[test]
+    fn pass_counts_down_on_the_clock_also_when_locked_or_gone() {
+        let mut t = Test::new();
+        t.now = at(21, 40, 0);
+        t.give_pass(30);
+        assert!(t.tick(&[session(1, JANIS)]).is_empty());
+        assert_eq!(
+            t.janis_left(),
+            TimeLeft {
+                left_ms: 29 * 60_000 + 40_000,
+                limit_ms: 30 * 60_000,
+                reason: Reason::Extra,
+            }
+        );
+        let locked = [Session {
+            locked: true,
+            ..session(1, JANIS)
+        }];
+        for _ in 0..30 {
+            t.tick(&locked);
+        }
+        assert_eq!(t.janis_left().left_ms, 19 * 60_000 + 40_000);
+        for _ in 0..30 {
+            t.tick(&[]);
+        }
+        assert_eq!(t.janis_left().left_ms, 9 * 60_000 + 40_000);
+    }
+
+    #[test]
+    fn pass_warns_and_ends_with_reason_extra() {
+        let mut t = Test::new();
+        t.now = at(21, 40, 0);
+        t.give_pass(30);
+        let s = [session(1, JANIS)];
+        let mut warnings = Vec::new();
+        let time_up = loop {
+            match t.tick(&s)[..] {
+                [] => {}
+                [
+                    Action::Warn {
+                        minutes_left,
+                        reason,
+                        ..
+                    },
+                ] => warnings.push((minutes_left, reason)),
+                [Action::TimeUp { reason, .. }] => break reason,
+                ref other => panic!("unexpected {other:?}"),
+            }
+        };
+        assert_eq!(
+            warnings,
+            [(10, Reason::Extra), (5, Reason::Extra), (1, Reason::Extra)]
+        );
+        assert_eq!(time_up, Reason::Extra);
+        assert_eq!(t.now, at(22, 10, 0));
+        assert!(t.state.passes.is_empty());
+
+        // After the pass, the allowed hours apply again.
+        assert_eq!(t.janis_left().reason, Reason::Hours);
+        let actions = loop {
+            let actions = t.tick_by(Duration::from_secs(1), &s);
+            if !actions.is_empty() {
+                break actions;
+            }
+        };
+        assert!(matches!(
+            actions[..],
+            [Action::Logoff {
+                reason: Reason::Hours,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn pass_during_time_up_cancels_sign_out() {
+        let mut t = Test::new();
+        t.now = at(21, 40, 0);
+        let s = [session(1, JANIS)];
+        assert!(matches!(
+            t.tick(&s)[..],
+            [Action::TimeUp {
+                reason: Reason::Hours,
+                ..
+            }]
+        ));
+        t.give_pass(15);
+        assert!(t.tick_by(Duration::from_secs(1), &s).is_empty());
+        for _ in 0..20 {
+            assert!(t.tick_by(Duration::from_secs(1), &s).is_empty());
+        }
+        assert!(!t.engine.has_pending());
+    }
+
+    #[test]
+    fn pass_goes_on_past_midnight() {
+        let mut t = Test::new();
+        t.now = at(23, 50, 0);
+        t.give_pass(30);
+        let s = [session(1, JANIS)];
+        // To 00:09:40, with no time-up.
+        for _ in 0..59 {
+            assert!(t.tick(&s).is_empty());
+        }
+        assert_eq!(
+            t.state.date,
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 10, 21).unwrap())
+        );
+        assert_eq!(
+            t.janis_left(),
+            TimeLeft {
+                left_ms: 10 * 60_000 + 20_000,
+                limit_ms: 30 * 60_000,
+                reason: Reason::Extra,
+            }
+        );
+    }
+
+    #[test]
+    fn clock_put_back_before_the_start_ends_the_pass() {
+        let mut t = Test::new();
+        t.now = at(21, 40, 0);
+        t.give_pass(30);
+        t.tick(&[]);
+        // A big clock change back is taken as a clock fix.
+        t.now -= chrono::TimeDelta::days(3);
+        assert!(matches!(
+            t.tick(&[session(1, JANIS)])[..],
+            [Action::TimeUp {
+                reason: Reason::Hours,
+                ..
+            }]
+        ));
+        assert!(t.state.passes.is_empty());
+    }
+
+    #[test]
+    fn clock_put_forward_past_the_end_ends_the_pass() {
+        let mut t = Test::new();
+        t.now = at(21, 40, 0);
+        t.give_pass(30);
+        t.tick(&[session(1, JANIS)]);
+        t.now += chrono::TimeDelta::hours(1);
+        assert!(matches!(
+            t.tick(&[session(1, JANIS)])[..],
+            [Action::TimeUp {
+                reason: Reason::Extra,
+                ..
+            }]
+        ));
+        assert!(t.state.passes.is_empty());
     }
 }
