@@ -71,7 +71,7 @@ The service runs in session 0 and cannot show its own windows on the child's scr
 - Drawn with plain Win32 windows, Direct2D and DirectWrite through the `windows` crate. No extra runtime is needed.
 - Not OpenGL-based GUI libraries: PCs and VMs without a good graphics driver may not run them. Direct2D falls back to software drawing (WARP).
 - Per-monitor DPI aware, so text is sharp on all screens.
-- Timer window: `WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`. Always on top, not in the taskbar, does not take focus from games or typing.
+- Timer window: `WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED` (see-through edges). Always on top, not in the taskbar, does not take focus from games or typing.
 - Warning and time-up windows: on top and shown in front.
 - Known limit: games in exclusive full-screen mode can cover all windows, including message boxes.
 

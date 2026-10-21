@@ -984,6 +984,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "windows",
+ "windows-numerics",
  "windows-service",
 ]
 

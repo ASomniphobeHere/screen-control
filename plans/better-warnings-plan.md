@@ -34,8 +34,9 @@ src/
 - `Win32_System_Threading`, `Win32_System_Environment` — `CreateProcessAsUserW`, `CreateEnvironmentBlock`.
 - `Win32_Graphics_Direct2D`, `Win32_Graphics_Direct2D_Common`, `Win32_Graphics_DirectWrite`, `Win32_Graphics_Dxgi_Common`, `Win32_Graphics_Gdi` — drawing.
 - `Win32_UI_HiDpi`, `Win32_UI_Input_KeyboardAndMouse` — DPI and mouse.
+- `Win32_System_LibraryLoader` — `GetModuleHandleW` for the window class.
 
-No new crates.
+No new crates. `windows-numerics` (already used by `windows`) is named in `Cargo.toml`, because Direct2D points use its `Vector2`.
 
 ## Messages
 
@@ -92,7 +93,8 @@ Each step ends with something that works and can be tested.
   - Green above 10 minutes, yellow under 10, red under 5.
   - Drag it to move it. It snaps to the nearest corner. Click it to switch between large and small. It cannot be closed.
   - At each warning it goes back to large size.
-  - Hidden when `show_timer` is false.
+  - Hidden when `show_timer` is false, and when no `status` came for 90 seconds (the service is gone).
+  - Counts down by itself each second between `status` messages, for at most 40 seconds.
 - Per-monitor DPI aware (`SetProcessDpiAwarenessContext`), so it is sharp at 100%, 150% and 200%.
 - The position and size are saved in the child's own `%LOCALAPPDATA%\ScreenControl\timer.json`. It is only a preference, so the child may change it.
 
