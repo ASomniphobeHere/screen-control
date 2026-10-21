@@ -37,6 +37,48 @@
 - `WTSSendMessageW` — show warning messages in the user's session from the service.
 - `WTSLogoffSession` — sign out the user when time ends.
 
+## Helper program for better warnings (later)
+
+The service runs in session 0 and cannot show its own windows on the child's screen. A helper program in the child's session shows the timer and the warning windows. The service still does all counting and sign-outs. The helper only shows what the service tells it.
+
+### Starting the helper
+
+- Same `.exe` with a new command: `screen-control helper`. Nothing more to install.
+- The service starts the helper in each child's session, as the child's user:
+  - `WTSQueryUserToken` — the child's token,
+  - `DuplicateTokenEx` — a primary token,
+  - `CreateEnvironmentBlock` — the child's environment,
+  - `CreateProcessAsUserW` with desktop `winsta0\default`.
+- Started at sign-in, and when the service starts with a child already signed in.
+- Each tick, the service checks that the helper is running in each child's session, and starts it again if not.
+- The helper ends by itself when the session ends.
+
+### Talking to the helper
+
+- Named pipe `\\.\pipe\ScreenControl`, created by the service at start with `FILE_FLAG_FIRST_PIPE_INSTANCE`. The service starts before anyone signs in, so no other program can take the name first.
+- Pipe access (ACL): SYSTEM full, signed-in users connect only.
+- The service checks which session a client is in with `GetNamedPipeClientSessionId`, and only sends a session its own child's data.
+- Messages are JSON, one per line, from the service to the helper:
+  - `status` — time left, reason, limit, every tick,
+  - `warn` — minutes left and reason,
+  - `time_up` — seconds until sign-out,
+  - `extra_time` — minutes given or taken, and by which parent.
+- The helper sends nothing back in this version. A fake helper made by a child only receives its own time left, so it is not a risk.
+- While a helper is connected for a session, the service does not send message boxes to that session. If not, it uses `WTSSendMessageW` as before.
+
+### Windows
+
+- Drawn with plain Win32 windows, Direct2D and DirectWrite through the `windows` crate. No extra runtime is needed.
+- Not OpenGL-based GUI libraries: PCs and VMs without a good graphics driver may not run them. Direct2D falls back to software drawing (WARP).
+- Per-monitor DPI aware, so text is sharp on all screens.
+- Timer window: `WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`. Always on top, not in the taskbar, does not take focus from games or typing.
+- Warning and time-up windows: on top and shown in front.
+- Known limit: games in exclusive full-screen mode can cover all windows, including message boxes.
+
+### Config
+
+- New optional child field `show_timer` (default `true`).
+
 ## Data storage
 
 - Folder: `C:\ProgramData\ScreenTime\`.

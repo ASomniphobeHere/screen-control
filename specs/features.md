@@ -28,6 +28,20 @@ Screen Control limits how long each child can use a Windows 11 PC each day. It r
 
 - The user gets a message 10, 5 and 1 minute before time ends.
 
+## Better warnings (later)
+
+Planned after Telegram and config updates. Until then, warnings are plain Windows message boxes.
+
+- **Timer:** a small timer in a corner of the screen always shows the time left today.
+  - Green while more than 10 minutes are left, yellow under 10 minutes, red under 5 minutes.
+  - The child can move it to another corner or make it smaller. It cannot be closed. At each warning it comes back to full size.
+  - Parents can turn the timer off for a child in the config.
+- **Warning window:** at 10, 5 and 1 minute, a window shows the child's name, the time left in large numbers, and the reason (daily limit or allowed hours). It closes by itself after a short time, or with a click.
+- **Time-up window:** when time ends, a window shows a countdown to the sign-out. It also says how to ask for more time.
+- **Extra time:** when a parent gives or takes time, the child sees it at once, for example "Mom gave you 30 minutes".
+- **Backup:** if the timer program is not running, the plain message boxes are used as before.
+- **Not a weak point:** if a child closes or kills the timer program, the limits still work. The service starts the timer program again.
+
 ## Enforcement
 
 - When time ends, the user is signed out.
