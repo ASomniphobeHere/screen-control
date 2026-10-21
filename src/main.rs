@@ -1,8 +1,7 @@
 mod app;
 mod config_sync;
 mod core;
-// Used by the pipe server and the helper (better warnings plan, steps 2 to 6).
-#[allow(dead_code)]
+mod helper;
 mod helper_protocol;
 mod logging;
 mod service;
@@ -24,6 +23,8 @@ Usage:
   screen-control service [--data-dir DIR]            run as a Windows service (started by Windows)
   screen-control console [--data-dir DIR]            run in this terminal, for testing
   screen-control check-config FILE [--pc-name NAME]  check a config file
+  screen-control helper --print                      print the messages the service sends to
+                                                     this session, for testing
 
 The data folder is C:\\ProgramData\\ScreenTime unless --data-dir is given.";
 
@@ -33,6 +34,7 @@ fn main() -> ExitCode {
         Some("service") => run_service(&args[1..]),
         Some("console") => run_console(&args[1..]),
         Some("check-config") => check_config(&args[1..]),
+        Some("helper") => helper::run(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

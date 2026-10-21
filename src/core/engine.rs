@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use chrono::Weekday;
 
 use super::config::{Child, Config};
-use super::day;
+use super::day::{self, LocalNow};
 use super::state::{ChildState, State};
 
 /// Warnings are shown when this many minutes are left.
@@ -30,6 +30,39 @@ pub fn budget_left_ms(child: &Child, cs: &ChildState, weekday: Weekday) -> i64 {
     // A missing limit cannot pass the config checks. If it happens anyway, allow nothing.
     let limit_ms = child.limits.for_day(weekday).unwrap_or(0) as i64 * 60_000;
     limit_ms + cs.extra_ms - cs.used_ms as i64
+}
+
+/// What `time_left` gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeLeft {
+    /// Until the budget is used up or the allowed hours end, whichever comes first. Can be below zero.
+    pub left_ms: i64,
+    /// Today's limit plus extra time. Can be below zero after `/take`.
+    pub limit_ms: i64,
+    /// What ends the time first.
+    pub reason: Reason,
+}
+
+/// The time left now, from the budget and the allowed hours.
+pub fn time_left(child: &Child, cs: &ChildState, now: &LocalNow) -> TimeLeft {
+    let budget_left = budget_left_ms(child, cs, now.weekday);
+    let hours_left = child.allowed_hours.map(|range| {
+        if range.contains(now.minute) {
+            range.minutes_until_end(now.minute) as i64 * 60_000 - now.second as i64 * 1000
+        } else {
+            0
+        }
+    });
+    let (left_ms, reason) = match hours_left {
+        Some(h) if h < budget_left => (h, Reason::Hours),
+        _ => (budget_left, Reason::Budget),
+    };
+    let limit_ms = child.limits.for_day(now.weekday).unwrap_or(0) as i64 * 60_000 + cs.extra_ms;
+    TimeLeft {
+        left_ms,
+        limit_ms,
+        reason,
+    }
 }
 
 /// An active Windows session.
@@ -155,18 +188,9 @@ impl Engine {
             let counted_ms = if seen.contains(&s.id) { delta_ms } else { 0 };
             cs.used_ms += counted_ms;
 
-            let budget_left = budget_left_ms(child, cs, now.weekday);
-            let hours_left = child.allowed_hours.map(|range| {
-                if range.contains(now.minute) {
-                    range.minutes_until_end(now.minute) as i64 * 60_000 - now.second as i64 * 1000
-                } else {
-                    0
-                }
-            });
-            let (left_ms, reason) = match hours_left {
-                Some(h) if h < budget_left => (h, Reason::Hours),
-                _ => (budget_left, Reason::Budget),
-            };
+            let TimeLeft {
+                left_ms, reason, ..
+            } = time_left(child, cs, &now);
 
             tracing::info!(
                 session = s.id,
@@ -505,6 +529,37 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn time_left_from_budget_or_hours() {
+        let cfg = good();
+        let janis = &cfg.children[0];
+        let cs = ChildState {
+            used_ms: 20 * 60_000,
+            extra_ms: 15 * 60_000,
+            ..Default::default()
+        };
+        let local = |utc| day::local_now(utc, cfg.utc_offset_minutes);
+
+        // 60 + 15 - 20 = 55 minutes of budget, hours end much later.
+        assert_eq!(
+            time_left(janis, &cs, &local(at(12, 0, 0))),
+            TimeLeft {
+                left_ms: 55 * 60_000,
+                limit_ms: 75 * 60_000,
+                reason: Reason::Budget,
+            }
+        );
+        // Allowed hours end at 21:00, in 10 minutes and 30 seconds.
+        assert_eq!(
+            time_left(janis, &cs, &local(at(20, 49, 30))),
+            TimeLeft {
+                left_ms: 10 * 60_000 + 30_000,
+                limit_ms: 75 * 60_000,
+                reason: Reason::Hours,
+            }
+        );
     }
 
     #[test]

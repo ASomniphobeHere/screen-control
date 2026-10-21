@@ -10,9 +10,12 @@ use chrono::Utc;
 use crate::config_sync::{self, Repo, SyncResult};
 use crate::core::commands::{self, Input, Out};
 use crate::core::config::{Config, Secrets};
-use crate::core::engine::{Action, Engine, Reason};
+use crate::core::day;
+use crate::core::engine::{self, Action, Engine, Reason, Session};
 use crate::core::state::State;
+use crate::helper_protocol::Message;
 use crate::telegram::api::Update;
+use crate::win::pipe_server::{self, Helpers};
 use crate::{storage, telegram, win};
 
 /// Time between ticks.
@@ -33,6 +36,10 @@ pub enum Event {
         request_id: String,
         to: i64,
         message_id: i64,
+    },
+    /// A helper connected to the pipe from this session.
+    HelperConnected {
+        session: u32,
     },
     /// A check of the config repo. `requested_by` is the parent who sent /reload.
     ConfigSync {
@@ -205,6 +212,9 @@ pub fn run(
             None
         }
     };
+    let helpers = pipe_server::start(sender.clone())
+        .map_err(|e| tracing::error!(error = format!("{e:#}"), "going on without helpers"))
+        .ok();
     let state = storage::load_state(&data.state());
     let sync = repo.and_then(|repo| {
         config_sync::start(repo, state.config_sha.clone(), sender)
@@ -222,12 +232,14 @@ pub fn run(
         last_clock: win::clock::unbiased_now(),
         telegram,
         sync,
+        helpers,
     };
     tracing::info!(
         pc = %app.cfg.pc_name,
         children = app.cfg.children.len(),
         telegram = app.telegram.is_some(),
         config_updates = app.sync.is_some(),
+        helpers = app.helpers.is_some(),
         "running"
     );
 
@@ -255,6 +267,13 @@ pub fn run(
                 result,
                 requested_by,
             }) => app.config_sync(result, requested_by),
+            Ok(Event::HelperConnected { session }) => {
+                match win::sessions::active_sessions() {
+                    Ok(sessions) => app.send_status(sessions.iter().filter(|s| s.id == session)),
+                    Err(e) => tracing::error!(error = format!("{e:#}"), "cannot list sessions"),
+                }
+                false
+            }
             Err(RecvTimeoutError::Timeout) => false,
         };
         // Session events can be missed, so also check for a new or ended session.
@@ -293,6 +312,8 @@ struct App {
     telegram: Option<Sender<Out>>,
     /// `None` when there is no GitHub token or repo. Send a parent's ID to check now.
     sync: Option<Sender<i64>>,
+    /// `None` when the pipe cannot be made.
+    helpers: Option<Helpers>,
 }
 
 impl App {
@@ -487,6 +508,44 @@ impl App {
         let expired = commands::expire(&self.cfg, &mut self.state, Utc::now());
         self.dispatch(expired);
         self.save();
+        self.send_status(sessions.iter());
+    }
+
+    /// Sends the time left to the helper of each child's session.
+    fn send_status<'a>(&self, sessions: impl Iterator<Item = &'a Session>) {
+        let Some(helpers) = &self.helpers else {
+            return;
+        };
+        let utc = day::effective_utc(Utc::now(), self.state.last_seen_utc);
+        let now = day::local_now(utc, self.cfg.utc_offset_minutes);
+        for s in sessions {
+            let Some(child) = self.cfg.child_by_sid(&s.sid) else {
+                continue;
+            };
+            // Before the first tick of a new day, the saved time is from yesterday.
+            let cs = match self.state.children.get(&child.id) {
+                Some(cs) if self.state.date == Some(now.date) => cs.clone(),
+                _ => Default::default(),
+            };
+            let t = engine::time_left(child, &cs, &now);
+            helpers.send(
+                s.id,
+                Message::Status {
+                    child_name: child.name.clone(),
+                    left_s: t.left_ms / 1000,
+                    limit_s: (t.limit_ms.max(0) / 1000) as u64,
+                    reason: t.reason,
+                    show_timer: child.show_timer,
+                },
+            );
+        }
+    }
+
+    /// Sends a message to the helper in the session, if there is one.
+    fn send_helper(&self, session: u32, message: Message) {
+        if let Some(helpers) = &self.helpers {
+            helpers.send(session, message);
+        }
     }
 
     fn run_action(&self, action: Action) {
@@ -516,6 +575,15 @@ impl App {
                         name(child_id)
                     ),
                 };
+                // Also sent to the helper, for testing. Step 6 of the better warnings plan
+                // sends it only to the helper when one is connected.
+                self.send_helper(
+                    *session,
+                    Message::Warn {
+                        minutes_left: *n,
+                        reason: *reason,
+                    },
+                );
                 win::actions::send_message(*session, MESSAGE_TITLE, &text)
             }
             Action::TimeUp {
@@ -535,9 +603,18 @@ impl App {
                 let child = self.cfg.children.iter().find(|c| &c.id == child_id);
                 let can_ask =
                     self.telegram.is_some() && child.is_some_and(|c| c.telegram_user_id.is_some());
-                if *reason == Reason::Budget && can_ask {
+                let can_ask = *reason == Reason::Budget && can_ask;
+                if can_ask {
                     text += "\n\nTo ask for more time, send /more 30 to the bot in Telegram.";
                 }
+                self.send_helper(
+                    *session,
+                    Message::TimeUp {
+                        grace_s: *grace_s,
+                        reason: *reason,
+                        can_ask,
+                    },
+                );
                 win::actions::send_message(*session, MESSAGE_TITLE, &text)
             }
             Action::Logoff { session, .. } => win::actions::logoff(*session),

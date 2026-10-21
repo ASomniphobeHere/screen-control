@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::engine::Reason;
 
+/// The pipe the service makes and the helper reads.
+pub const PIPE_NAME: &str = r"\\.\pipe\ScreenControl";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Message {
