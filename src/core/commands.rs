@@ -50,8 +50,16 @@ pub enum Out {
     },
     /// Every button press must be answered, or Telegram shows a loading sign.
     Answer { callback_id: String, text: String },
-    /// Show a message on the PC to a child who is signed in.
-    NotifyPc { child_id: String, text: String },
+    /// A parent gave or took time. Shown on the PC to a child who is signed in: by the helper,
+    /// or as `text` in a message box.
+    NotifyPc {
+        child_id: String,
+        text: String,
+        /// Below zero when time was taken.
+        minutes: i32,
+        /// The parent's name.
+        by: String,
+    },
     /// Check the config repo now, and tell the parent `to` the result.
     Reload { to: i64 },
 }
@@ -320,6 +328,12 @@ fn parent_command(
             out.push(Out::NotifyPc {
                 child_id: child.id.clone(),
                 text: pc_text,
+                minutes: if give {
+                    minutes as i32
+                } else {
+                    -(minutes as i32)
+                },
+                by: parent.name.clone(),
             });
             out
         }
@@ -430,6 +444,8 @@ fn button(
             out.push(Out::NotifyPc {
                 child_id: request.child_id.clone(),
                 text: pc_text,
+                minutes: minutes as i32,
+                by: parent.name.clone(),
             });
             out
         }
@@ -672,7 +688,9 @@ mod tests {
         assert_eq!(texts_to(&out, JANIS), ["Dad gave you 15 more minutes."]);
         assert!(out.contains(&Out::NotifyPc {
             child_id: "janis".into(),
-            text: "Dad gave you 15 more minutes.".into()
+            text: "Dad gave you 15 more minutes.".into(),
+            minutes: 15,
+            by: "Dad".into(),
         }));
         assert_eq!(state.child_mut("janis").extra_ms, 15 * 60_000);
 
@@ -742,8 +760,20 @@ mod tests {
             ["Mom gave Jānis 30 min. 1 h 30 min left today."]
         );
         assert_eq!(texts_to(&out, JANIS), ["Mom gave you 30 more minutes."]);
+        assert!(out.contains(&Out::NotifyPc {
+            child_id: "janis".into(),
+            text: "Mom gave you 30 more minutes.".into(),
+            minutes: 30,
+            by: "Mom".into(),
+        }));
 
-        text(&cfg, &mut state, DAD, "/take janis 45");
+        let out = text(&cfg, &mut state, DAD, "/take janis 45");
+        assert!(out.contains(&Out::NotifyPc {
+            child_id: "janis".into(),
+            text: "Dad took 45 minutes of your time.".into(),
+            minutes: -45,
+            by: "Dad".into(),
+        }));
         assert_eq!(state.child_mut("janis").extra_ms, -15 * 60_000);
 
         // Pēteris has no Telegram: no message to him, but still a message on the PC.

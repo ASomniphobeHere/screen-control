@@ -53,6 +53,9 @@ const BUFFER: u32 = 64 * 1024;
 /// A write that takes longer means the helper does not read. It is then dropped.
 const WRITE_TIMEOUT_MS: u32 = 5000;
 
+/// How long `deliver` waits for the writer thread. Writes are normally done at once.
+const DELIVER_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Sends messages to the helpers. Cheap to use from the main loop: it never waits.
 pub struct Helpers {
     tx: Sender<Cmd>,
@@ -64,7 +67,22 @@ impl Helpers {
     /// Sends the message to the helper in the session, if one is connected.
     pub fn send(&self, session: u32, message: Message) {
         // Fails only if the writer thread has ended. Then there are no helpers.
-        let _ = self.tx.send(Cmd::Send(session, message));
+        let _ = self.tx.send(Cmd::Send(session, message, None));
+    }
+
+    /// Writes the message to the helper in the session and waits for the result. Returns true if
+    /// a helper is connected and the write worked, so the caller knows if it must use a message
+    /// box instead. Messages sent before this one are written first.
+    pub fn deliver(&self, session: u32, message: Message) -> bool {
+        let (done, result) = mpsc::channel();
+        if self
+            .tx
+            .send(Cmd::Send(session, message, Some(done)))
+            .is_err()
+        {
+            return false;
+        }
+        result.recv_timeout(DELIVER_TIMEOUT) == Ok(Sent::Written)
     }
 
     /// Sessions with a connected helper. A helper that has ended is only noticed when a write to
@@ -81,7 +99,8 @@ impl Helpers {
 
 enum Cmd {
     Connected(u32, Pipe),
-    Send(u32, Message),
+    /// The result is sent back if there is a sender.
+    Send(u32, Message, Option<Sender<Sent>>),
     KeepOnly(Vec<u32>),
 }
 
@@ -154,9 +173,13 @@ fn write_all(rx: Receiver<Cmd>, connected: &Mutex<HashSet<u32>>) {
                     tracing::info!(session, "older helper in the session replaced");
                 }
             }
-            Cmd::Send(session, message) => {
-                if let Err(e) = clients.send(session, &message) {
+            Cmd::Send(session, message, done) => {
+                let sent = clients.send(session, &message);
+                if let Sent::Failed(e) = &sent {
                     tracing::warn!(session, error = %e, "cannot write to the helper, dropped");
+                }
+                if let Some(done) = done {
+                    let _ = done.send(sent);
                 }
             }
             Cmd::KeepOnly(sessions) => {
@@ -167,6 +190,27 @@ fn write_all(rx: Receiver<Cmd>, connected: &Mutex<HashSet<u32>>) {
         }
         if let Ok(mut c) = connected.lock() {
             *c = clients.by_session.keys().copied().collect();
+        }
+    }
+}
+
+/// The result of a write to a session's helper.
+#[derive(Debug)]
+pub enum Sent {
+    Written,
+    /// The session has no connected helper.
+    NoClient,
+    /// The write failed and the helper was dropped.
+    Failed(io::Error),
+}
+
+impl PartialEq for Sent {
+    /// Errors are equal if their kinds are.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Sent::Written, Sent::Written) | (Sent::NoClient, Sent::NoClient) => true,
+            (Sent::Failed(a), Sent::Failed(b)) => a.kind() == b.kind(),
+            _ => false,
         }
     }
 }
@@ -190,17 +234,18 @@ impl<W: Write> Clients<W> {
         self.by_session.insert(session, client).is_some()
     }
 
-    /// Writes the message as one line. A session without a client is not an error.
-    /// A client that fails is dropped, and the error is returned.
-    fn send(&mut self, session: u32, message: &Message) -> io::Result<()> {
+    /// Writes the message as one line. A client that fails is dropped.
+    fn send(&mut self, session: u32, message: &Message) -> Sent {
         let Some(client) = self.by_session.get_mut(&session) else {
-            return Ok(());
+            return Sent::NoClient;
         };
-        let result = client.write_all(message.to_line().as_bytes());
-        if result.is_err() {
-            self.by_session.remove(&session);
+        match client.write_all(message.to_line().as_bytes()) {
+            Ok(()) => Sent::Written,
+            Err(e) => {
+                self.by_session.remove(&session);
+                Sent::Failed(e)
+            }
         }
-        result
     }
 
     /// Drops the clients of sessions not in the list. Returns the dropped sessions.
@@ -408,17 +453,17 @@ mod tests {
         let mut clients = Clients::default();
         assert!(!clients.connect(1, &mut a));
         assert!(!clients.connect(2, &mut b));
-        clients.send(2, &warn(5)).unwrap();
-        clients.send(2, &warn(1)).unwrap();
+        assert_eq!(clients.send(2, &warn(5)), Sent::Written);
+        assert_eq!(clients.send(2, &warn(1)), Sent::Written);
         drop(clients);
         assert_eq!(text(&a), "");
         assert_eq!(text(&b), warn(5).to_line() + &warn(1).to_line());
     }
 
     #[test]
-    fn session_without_client_is_not_an_error() {
+    fn session_without_client_is_told() {
         let mut clients: Clients<&mut Fake> = Clients::default();
-        clients.send(7, &warn(10)).unwrap();
+        assert_eq!(clients.send(7, &warn(10)), Sent::NoClient);
     }
 
     #[test]
@@ -427,7 +472,7 @@ mod tests {
         let mut clients = Clients::default();
         clients.connect(3, &mut old);
         assert!(clients.connect(3, &mut new));
-        clients.send(3, &warn(5)).unwrap();
+        assert_eq!(clients.send(3, &warn(5)), Sent::Written);
         drop(clients);
         assert_eq!(text(&old), "");
         assert_eq!(text(&new), warn(5).to_line());
@@ -441,10 +486,13 @@ mod tests {
         };
         let mut clients = Clients::default();
         clients.connect(4, &mut broken);
-        assert!(clients.send(4, &warn(5)).is_err());
+        assert_eq!(
+            clients.send(4, &warn(5)),
+            Sent::Failed(io::ErrorKind::BrokenPipe.into())
+        );
         assert!(clients.by_session.is_empty());
-        // Later messages to the session are not an error.
-        clients.send(4, &warn(1)).unwrap();
+        // Later messages to the session find no client, so a message box is used.
+        assert_eq!(clients.send(4, &warn(1)), Sent::NoClient);
     }
 
     #[test]

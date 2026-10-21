@@ -37,6 +37,16 @@ pub enum Message {
 }
 
 impl Message {
+    /// The `type` field, for logs.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Message::Status { .. } => "status",
+            Message::Warn { .. } => "warn",
+            Message::TimeUp { .. } => "time_up",
+            Message::ExtraTime { .. } => "extra_time",
+        }
+    }
+
     /// One JSON line, ending with `\n`. JSON strings escape new lines, so the line has no others.
     pub fn to_line(&self) -> String {
         let mut line = serde_json::to_string(self).expect("messages always convert to JSON");
@@ -59,6 +69,7 @@ mod tests {
     fn check(msg: Message, json: &str) {
         let line = msg.to_line();
         assert_eq!(line, format!("{json}\n"));
+        assert!(line.starts_with(&format!(r#"{{"type":"{}""#, msg.kind())));
         assert_eq!(Message::from_line(&line).unwrap(), msg);
     }
 

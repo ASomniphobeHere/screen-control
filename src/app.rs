@@ -305,6 +305,61 @@ pub fn run(
     Ok(())
 }
 
+/// Something to show on the child's screen: a message for the helper, and the same as text for a
+/// message box when there is no helper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Notice {
+    message: Message,
+    text: String,
+}
+
+impl Notice {
+    fn warn(name: &str, minutes_left: u32, reason: Reason) -> Notice {
+        let n = minutes_left;
+        let unit = if n == 1 { "minute" } else { "minutes" };
+        let text = match reason {
+            Reason::Budget => format!("{name}, you have {n} {unit} of screen time left today."),
+            Reason::Hours => {
+                format!("{name}, screen time ends in {n} {unit}: allowed hours are almost over.")
+            }
+        };
+        Notice {
+            message: Message::Warn {
+                minutes_left,
+                reason,
+            },
+            text,
+        }
+    }
+
+    fn time_up(name: &str, reason: Reason, grace_s: u64, can_ask: bool) -> Notice {
+        let why = match reason {
+            Reason::Budget => "your screen time for today is used up",
+            Reason::Hours => "screen time is not allowed at this hour",
+        };
+        let mut text = format!("{name}, {why}.\n\nYou will be signed out in {grace_s} seconds.");
+        if can_ask {
+            text += "\n\nTo ask for more time, send /more 30 to the bot in Telegram.";
+        }
+        Notice {
+            message: Message::TimeUp {
+                grace_s,
+                reason,
+                can_ask,
+            },
+            text,
+        }
+    }
+
+    /// `text` is made by the Telegram command, so it is the same as the child gets in Telegram.
+    fn extra_time(text: String, minutes: i32, by: String) -> Notice {
+        Notice {
+            message: Message::ExtraTime { minutes, by },
+            text,
+        }
+    }
+}
+
 struct App {
     state_path: PathBuf,
     config_path: PathBuf,
@@ -459,7 +514,12 @@ impl App {
     fn dispatch(&self, outs: Vec<Out>) {
         for out in outs {
             match out {
-                Out::NotifyPc { child_id, text } => self.notify_pc(&child_id, &text),
+                Out::NotifyPc {
+                    child_id,
+                    text,
+                    minutes,
+                    by,
+                } => self.notify_pc(&child_id, Notice::extra_time(text, minutes, by)),
                 Out::Reload { to } => {
                     let text = match &self.sync {
                         Some(sync) if sync.send(to).is_ok() => "Checking for a new config…",
@@ -477,7 +537,7 @@ impl App {
         }
     }
 
-    fn notify_pc(&self, child_id: &str, text: &str) {
+    fn notify_pc(&self, child_id: &str, notice: Notice) {
         let Some(child) = self.cfg.children.iter().find(|c| c.id == child_id) else {
             return;
         };
@@ -486,7 +546,7 @@ impl App {
             .iter()
             .filter(|s| s.sid.eq_ignore_ascii_case(&child.sid))
         {
-            if let Err(e) = win::actions::send_message(s.id, MESSAGE_TITLE, text) {
+            if let Err(e) = self.show(s.id, notice.clone()) {
                 tracing::error!(
                     session = s.id,
                     error = format!("{e:#}"),
@@ -494,6 +554,23 @@ impl App {
                 );
             }
         }
+    }
+
+    /// Shows the notice by the session's helper. If the session has no connected helper, or the
+    /// write to it fails, shows a message box instead.
+    fn show(&self, session: u32, notice: Notice) -> Result<()> {
+        let Notice { message, text } = notice;
+        let kind = message.kind();
+        if self
+            .helpers
+            .as_ref()
+            .is_some_and(|h| h.deliver(session, message))
+        {
+            tracing::info!(session, kind, "shown by the helper");
+            return Ok(());
+        }
+        tracing::info!(session, kind, "no helper, shown in a message box");
+        win::actions::send_message(session, MESSAGE_TITLE, &text)
     }
 
     fn tick(&mut self) {
@@ -517,13 +594,14 @@ impl App {
         let actions = self
             .engine
             .tick(&self.cfg, &mut self.state, Utc::now(), delta, &sessions);
+        // Before the actions, so a helper knows the child's name before a warning.
+        self.send_status(sessions.iter());
         for action in actions {
             self.run_action(action);
         }
         let expired = commands::expire(&self.cfg, &mut self.state, Utc::now());
         self.dispatch(expired);
         self.save();
-        self.send_status(sessions.iter());
     }
 
     /// Sends the time left to the helper of each child's session.
@@ -575,13 +653,6 @@ impl App {
         }
     }
 
-    /// Sends a message to the helper in the session, if there is one.
-    fn send_helper(&self, session: u32, message: Message) {
-        if let Some(helpers) = &self.helpers {
-            helpers.send(session, message);
-        }
-    }
-
     fn run_action(&self, action: Action) {
         let name = |id: &str| {
             self.cfg
@@ -596,60 +667,24 @@ impl App {
                 child_id,
                 minutes_left,
                 reason,
-            } => {
-                let n = minutes_left;
-                let unit = if *n == 1 { "minute" } else { "minutes" };
-                let text = match reason {
-                    Reason::Budget => format!(
-                        "{}, you have {n} {unit} of screen time left today.",
-                        name(child_id)
-                    ),
-                    Reason::Hours => format!(
-                        "{}, screen time ends in {n} {unit}: allowed hours are almost over.",
-                        name(child_id)
-                    ),
-                };
-                // Also sent to the helper, for testing. Step 6 of the better warnings plan
-                // sends it only to the helper when one is connected.
-                self.send_helper(
-                    *session,
-                    Message::Warn {
-                        minutes_left: *n,
-                        reason: *reason,
-                    },
-                );
-                win::actions::send_message(*session, MESSAGE_TITLE, &text)
-            }
+            } => self.show(
+                *session,
+                Notice::warn(&name(child_id), *minutes_left, *reason),
+            ),
             Action::TimeUp {
                 session,
                 child_id,
                 reason,
                 grace_s,
             } => {
-                let why = match reason {
-                    Reason::Budget => "your screen time for today is used up",
-                    Reason::Hours => "screen time is not allowed at this hour",
-                };
-                let mut text = format!(
-                    "{}, {why}.\n\nYou will be signed out in {grace_s} seconds.",
-                    name(child_id),
-                );
                 let child = self.cfg.children.iter().find(|c| &c.id == child_id);
                 let can_ask =
                     self.telegram.is_some() && child.is_some_and(|c| c.telegram_user_id.is_some());
                 let can_ask = *reason == Reason::Budget && can_ask;
-                if can_ask {
-                    text += "\n\nTo ask for more time, send /more 30 to the bot in Telegram.";
-                }
-                self.send_helper(
+                self.show(
                     *session,
-                    Message::TimeUp {
-                        grace_s: *grace_s,
-                        reason: *reason,
-                        can_ask,
-                    },
-                );
-                win::actions::send_message(*session, MESSAGE_TITLE, &text)
+                    Notice::time_up(&name(child_id), *reason, *grace_s, can_ask),
+                )
             }
             Action::Logoff { session, .. } => win::actions::logoff(*session),
         };
@@ -663,5 +698,65 @@ impl App {
         if let Err(e) = storage::save_json(&self.state_path, &self.state) {
             tracing::error!(error = format!("{e:#}"), "cannot save state");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn warn_notice() {
+        assert_eq!(
+            Notice::warn("Jānis", 5, Reason::Budget),
+            Notice {
+                message: Message::Warn {
+                    minutes_left: 5,
+                    reason: Reason::Budget
+                },
+                text: "Jānis, you have 5 minutes of screen time left today.".into(),
+            }
+        );
+        assert_eq!(
+            Notice::warn("Jānis", 1, Reason::Hours).text,
+            "Jānis, screen time ends in 1 minute: allowed hours are almost over."
+        );
+    }
+
+    #[test]
+    fn time_up_notice() {
+        assert_eq!(
+            Notice::time_up("Jānis", Reason::Budget, 10, true),
+            Notice {
+                message: Message::TimeUp {
+                    grace_s: 10,
+                    reason: Reason::Budget,
+                    can_ask: true
+                },
+                text: "Jānis, your screen time for today is used up.\n\nYou will be signed out in 10 seconds.\n\nTo ask for more time, send /more 30 to the bot in Telegram.".into(),
+            }
+        );
+        assert_eq!(
+            Notice::time_up("Pēteris", Reason::Hours, 5, false).text,
+            "Pēteris, screen time is not allowed at this hour.\n\nYou will be signed out in 5 seconds."
+        );
+    }
+
+    #[test]
+    fn extra_time_notice() {
+        assert_eq!(
+            Notice::extra_time(
+                "Dad took 15 minutes of your time.".into(),
+                -15,
+                "Dad".into()
+            ),
+            Notice {
+                message: Message::ExtraTime {
+                    minutes: -15,
+                    by: "Dad".into()
+                },
+                text: "Dad took 15 minutes of your time.".into(),
+            }
+        );
     }
 }

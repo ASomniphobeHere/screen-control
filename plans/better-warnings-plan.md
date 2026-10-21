@@ -119,7 +119,9 @@ Each step ends with something that works and can be tested.
 - In `app.rs`:
   - Each tick, send `status` to the helper of each child's session.
   - `Warn` and `TimeUp` actions: if the session has a connected helper, send `warn` or `time_up` to it. If not, use `WTSSendMessageW` as now.
-  - `NotifyPc` from Telegram commands becomes `extra_time` for a session with a helper.
+  - `NotifyPc` from Telegram commands becomes `extra_time` for a session with a helper. `NotifyPc` carries the minutes and the parent's name for this.
+  - The check is made for each message when it is sent: if the session has no helper, or the write to it fails, that message uses a message box.
+  - In a tick, `status` is sent before `warn` and `time_up`, so the helper knows the child's name.
 - Log which way each message went (helper or message box).
 
 **Done when:** with the helper running, no message boxes appear. With the helper killed, message boxes appear again until it is back.
