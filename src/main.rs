@@ -3,6 +3,7 @@ mod core;
 mod logging;
 mod service;
 mod storage;
+mod telegram;
 mod win;
 
 use std::path::{Path, PathBuf};
@@ -74,16 +75,17 @@ fn run_console(args: &[String]) -> Result<ExitCode> {
     let data = data_dir(args)?;
     tracing::info!(data_dir = %data.0.display(), "starting in console mode");
 
-    let (cfg, _secrets) = app::load_checked(&data)?;
+    let (cfg, secrets) = app::load_checked(&data)?;
 
     let (events, rx) = mpsc::channel();
+    let stop = events.clone();
     ctrlc::set_handler(move || {
-        let _ = events.send(Event::Stop);
+        let _ = stop.send(Event::Stop);
     })
     .context("cannot set the Ctrl+C handler")?;
     tracing::info!("press Ctrl+C to stop");
 
-    app::run(&data, cfg, rx)?;
+    app::run(&data, cfg, secrets, events, rx)?;
     Ok(ExitCode::SUCCESS)
 }
 

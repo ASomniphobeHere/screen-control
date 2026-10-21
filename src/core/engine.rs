@@ -5,9 +5,11 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
-use super::config::Config;
+use chrono::Weekday;
+
+use super::config::{Child, Config};
 use super::day;
-use super::state::State;
+use super::state::{ChildState, State};
 
 /// Warnings are shown when this many minutes are left.
 pub const WARN_MINUTES: [u32; 3] = [10, 5, 1];
@@ -21,6 +23,13 @@ pub const LOGON_GRACE: Duration = Duration::from_secs(5);
 
 /// If a session is still there this long after a sign-out, sign it out again.
 const LOGOFF_RETRY: Duration = Duration::from_secs(10);
+
+/// Daily limit plus extra time minus used time. Can be below zero.
+pub fn budget_left_ms(child: &Child, cs: &ChildState, weekday: Weekday) -> i64 {
+    // A missing limit cannot pass the config checks. If it happens anyway, allow nothing.
+    let limit_ms = child.limits.for_day(weekday).unwrap_or(0) as i64 * 60_000;
+    limit_ms + cs.extra_ms - cs.used_ms as i64
+}
 
 /// An active Windows session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,9 +153,7 @@ impl Engine {
             let counted_ms = if seen.contains(&s.id) { delta_ms } else { 0 };
             cs.used_ms += counted_ms;
 
-            // A missing limit cannot pass the config checks. If it happens anyway, allow nothing.
-            let limit_ms = child.limits.for_day(now.weekday).unwrap_or(0) as i64 * 60_000;
-            let budget_left = limit_ms + cs.extra_ms - cs.used_ms as i64;
+            let budget_left = budget_left_ms(child, cs, now.weekday);
             let hours_left = child.allowed_hours.map(|range| {
                 if range.contains(now.minute) {
                     range.minutes_until_end(now.minute) as i64 * 60_000 - now.second as i64 * 1000

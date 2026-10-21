@@ -20,6 +20,9 @@ pub struct State {
     pub children: BTreeMap<String, ChildState>,
     #[serde(default)]
     pub requests: Vec<Request>,
+    /// Makes request IDs. Not reset at a new day.
+    #[serde(default)]
+    pub next_request_id: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

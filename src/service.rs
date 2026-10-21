@@ -36,7 +36,8 @@ fn service_main(_args: Vec<OsString>) {
 
 fn run_service() -> Result<()> {
     let data = DATA_DIR.get().context("data folder not set")?;
-    let (events, rx) = mpsc::channel();
+    let (sender, rx) = mpsc::channel();
+    let events = sender.clone();
 
     let status = service_control_handler::register(SERVICE_NAME, move |control| match control {
         ServiceControl::Stop | ServiceControl::Shutdown => {
@@ -69,7 +70,8 @@ fn run_service() -> Result<()> {
     set(ServiceState::Running, accept, ServiceExitCode::Win32(0))?;
     tracing::info!("service started");
 
-    let result = app::load_checked(data).and_then(|(cfg, _secrets)| app::run(data, cfg, rx));
+    let result =
+        app::load_checked(data).and_then(|(cfg, secrets)| app::run(data, cfg, secrets, sender, rx));
     if let Err(e) = &result {
         tracing::error!(error = format!("{e:#}"), "stopped with an error");
     }
