@@ -107,6 +107,10 @@ Each step ends with something that works and can be tested.
   - Time-up: "Your time is up" and a countdown to the sign-out. If `can_ask` is true, it also says to send `/more 30` to the bot. It does not close.
   - Extra time: "Mom gave you 30 minutes". It closes after 10 seconds.
 - Only one window at a time. A newer one replaces an older one.
+- The child's name comes from the last `status`, so the messages need no new fields.
+- Time-up closes when a `status` with time left comes (a parent gave time during the countdown).
+- Keys and clicks in the first 0.8 seconds are not used, so a child who is typing does not close a warning before reading it.
+- A debug command `screen-control helper --show warn10 extra time-up` shows sample windows without the service.
 
 **Done when:** in the VM, all three windows show at the right time, and the warnings close by themselves.
 

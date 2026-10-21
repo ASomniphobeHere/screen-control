@@ -1,12 +1,14 @@
 //! `screen-control helper`: runs in a child's session and shows what the service sends through
 //! the pipe. The service starts it in each child's session.
 //!
-//! - `helper`: one copy per session. Shows the timer. A thread reads the pipe and gives each
-//!   message to the window thread. The warning windows come in step 5 of the better warnings
-//!   plan; until then those messages are only logged.
+//! - `helper`: one copy per session. Shows the timer and the popups. A thread reads the pipe and
+//!   gives each message to the window thread.
 //! - `helper --print`: prints each message, for testing. Not limited to one copy.
+//! - `helper --show <popup>...`: shows sample popups without the service, to see how they look.
+//!   It only draws in the user's own session and changes nothing.
 
 mod draw;
+mod popup;
 mod timer;
 
 use std::fs::{File, OpenOptions};
@@ -28,7 +30,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, MSG, PostThreadMessageW, SetTimer, TranslateMessage, WM_APP,
-    WM_TIMER,
+    WM_QUIT, WM_TIMER,
 };
 
 use crate::helper_protocol::{Message, PIPE_NAME};
@@ -51,6 +53,9 @@ pub fn run(args: &[String]) -> Result<ExitCode> {
                 Err(e) => println!("{time} BAD {e:#}"),
             }
         })
+    } else if let Some(i) = args.iter().position(|a| a == "--show") {
+        logging::init_console();
+        show_samples(&args[i + 1..])
     } else {
         run_helper()
     }
@@ -76,15 +81,8 @@ fn run_helper() -> Result<ExitCode> {
     };
     tracing::info!(pid = std::process::id(), "helper started");
 
-    // Sharp on each screen, at any display scaling.
-    if let Err(e) =
-        unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }
-    {
-        tracing::warn!(error = %e, "cannot set DPI awareness");
-    }
     // The windows first, so the helper only connects when it can show things.
-    let draw = Rc::new(draw::Draw::new()?);
-    let timer = timer::Timer::new(draw, user_file("timer.json"))?;
+    let ui = Ui::new(user_file("timer.json"))?;
 
     let (sender, inbox) = mpsc::channel();
     let ui_thread = unsafe { GetCurrentThreadId() };
@@ -107,35 +105,133 @@ fn run_helper() -> Result<ExitCode> {
         })
     });
 
-    let mut ui = Ui { timer, inbox };
-    run_windows(&mut ui);
+    run_windows(ui, &inbox);
     Ok(ExitCode::SUCCESS)
 }
 
-/// The windows of the helper and the messages waiting for them.
+/// Sample messages for `helper --show`.
+fn sample(name: &str) -> Option<Message> {
+    use crate::core::engine::Reason;
+    let warn = |minutes_left, reason| Message::Warn {
+        minutes_left,
+        reason,
+    };
+    let time_up = |reason, can_ask| Message::TimeUp {
+        grace_s: 10,
+        reason,
+        can_ask,
+    };
+    let extra = |minutes, by: &str| Message::ExtraTime {
+        minutes,
+        by: by.into(),
+    };
+    Some(match name {
+        "warn10" => warn(10, Reason::Budget),
+        "warn5" => warn(5, Reason::Budget),
+        "warn1" => warn(1, Reason::Hours),
+        "time-up" => time_up(Reason::Budget, true),
+        "time-up-hours" => time_up(Reason::Hours, false),
+        "extra" => extra(30, "Mom"),
+        "taken" => extra(-15, "Dad"),
+        _ => return None,
+    })
+}
+
+/// `helper --show <popup>...`: shows sample popups 5 seconds apart, so a newer one replaces an
+/// older one, and quits 20 seconds after the last.
+fn show_samples(names: &[String]) -> Result<ExitCode> {
+    let Some(messages) = names.iter().map(|n| sample(n)).collect::<Option<Vec<_>>>() else {
+        eprintln!("popups: warn10, warn5, warn1, time-up, time-up-hours, extra, taken");
+        return Ok(ExitCode::FAILURE);
+    };
+    let mut ui = Ui::new(None)?;
+    ui.child_name = Some("Jānis".into());
+    let (sender, inbox) = mpsc::channel();
+    let ui_thread = unsafe { GetCurrentThreadId() };
+    let post = move |msg| unsafe { PostThreadMessageW(ui_thread, msg, WPARAM(0), LPARAM(0)) };
+    thread::spawn(move || {
+        for message in messages {
+            if sender.send(message).is_ok() {
+                let _ = post(WM_APP_MESSAGES);
+            }
+            thread::sleep(Duration::from_secs(5));
+        }
+        thread::sleep(Duration::from_secs(15));
+        let _ = post(WM_QUIT);
+    });
+    run_windows(ui, &inbox);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The windows of the helper.
 struct Ui {
     timer: timer::Timer,
-    inbox: Receiver<Message>,
+    popup: popup::Popup,
+    /// From the last `status`, for the popups.
+    child_name: Option<String>,
 }
 
 impl Ui {
+    /// Makes the windows, hidden until messages come.
+    fn new(timer_prefs: Option<PathBuf>) -> Result<Ui> {
+        // Sharp on each screen, at any display scaling.
+        if let Err(e) =
+            unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }
+        {
+            tracing::warn!(error = %e, "cannot set DPI awareness");
+        }
+        let draw = Rc::new(draw::Draw::new()?);
+        Ok(Ui {
+            timer: timer::Timer::new(Rc::clone(&draw), timer_prefs)?,
+            popup: popup::Popup::new(draw)?,
+            child_name: None,
+        })
+    }
+
     fn on_message(&mut self, message: Message) {
+        let name = self.child_name.clone();
         match message {
             Message::Status {
+                child_name,
                 left_s,
                 limit_s,
                 show_timer,
                 ..
-            } => self.timer.set_status(left_s, limit_s, show_timer),
-            // Step 5 shows the warning window here.
-            Message::Warn { .. } => self.timer.make_large(),
-            Message::TimeUp { .. } | Message::ExtraTime { .. } => {}
+            } => {
+                self.child_name = Some(child_name);
+                self.timer.set_status(left_s, limit_s, show_timer);
+                self.popup.on_status(left_s);
+            }
+            Message::Warn {
+                minutes_left,
+                reason,
+            } => {
+                self.timer.make_large();
+                self.popup.show(popup::Content::Warn {
+                    name,
+                    minutes_left,
+                    reason,
+                });
+            }
+            Message::TimeUp {
+                grace_s,
+                reason,
+                can_ask,
+            } => self.popup.show(popup::Content::TimeUp {
+                name,
+                grace_s,
+                reason,
+                can_ask,
+            }),
+            Message::ExtraTime { minutes, by } => {
+                self.popup.show(popup::Content::ExtraTime { minutes, by })
+            }
         }
     }
 }
 
-/// The window thread's message loop. Runs until the process ends.
-fn run_windows(ui: &mut Ui) {
+/// The window thread's message loop. Runs until the process ends, or until `WM_QUIT`.
+fn run_windows(mut ui: Ui, inbox: &Receiver<Message>) {
     // A thread timer: WM_TIMER comes with no window.
     unsafe { SetTimer(None, 0, TICK_MS, None) };
     let mut msg = MSG::default();
@@ -143,7 +239,7 @@ fn run_windows(ui: &mut Ui) {
         if msg.hwnd.is_invalid() {
             match msg.message {
                 WM_APP_MESSAGES => {
-                    while let Ok(message) = ui.inbox.try_recv() {
+                    while let Ok(message) = inbox.try_recv() {
                         ui.on_message(message);
                     }
                 }

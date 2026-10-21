@@ -27,6 +27,9 @@ Usage:
                                                      child's session
   screen-control helper --print                      print the messages the service sends to
                                                      this session, for testing
+  screen-control helper --show POPUP...              show sample popups, 5 seconds apart, to
+                                                     see how they look (warn10, warn5, warn1,
+                                                     time-up, time-up-hours, extra, taken)
 
 The data folder is C:\\ProgramData\\ScreenTime unless --data-dir is given.";
 

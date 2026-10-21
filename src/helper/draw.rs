@@ -18,9 +18,9 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_LINE_METRICS,
     DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
-    DWriteCreateFactory, IDWriteFactory, IDWriteTextLayout,
+    DWriteCreateFactory, IDWriteFactory, IDWriteTextLayout, IDWriteTextLayout1,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
@@ -30,7 +30,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
-use windows::core::{HSTRING, w};
+use windows::core::{HSTRING, Interface, w};
 use windows_numerics::Vector2;
 
 /// A colour from `0xRRGGBB` and an alpha from 0 to 1.
@@ -57,9 +57,17 @@ pub mod colour {
     pub const TEXT_YELLOW: D2D1_COLOR_F = rgba(0xF2CC60, 1.0);
     pub const TEXT_RED: D2D1_COLOR_F = rgba(0xFF9B94, 1.0);
     pub const LABEL: D2D1_COLOR_F = rgba(0xC9CDD3, 1.0);
+    /// The popups.
+    pub const CARD: D2D1_COLOR_F = rgba(0x18181B, 1.0);
+    pub const MUTED: D2D1_COLOR_F = rgba(0xA1A1AA, 1.0);
+    pub const BODY: D2D1_COLOR_F = rgba(0xD4D4D8, 1.0);
+    pub const BAR: D2D1_COLOR_F = rgba(0xFFFFFF, 0.12);
+    pub const GREEN_BACK: D2D1_COLOR_F = rgba(0x1F3D2A, 1.0);
+    pub const RED_BACK: D2D1_COLOR_F = rgba(0x3D2220, 1.0);
 }
 
 pub const FONT: &str = "Segoe UI";
+pub const BOLD: DWRITE_FONT_WEIGHT = DWRITE_FONT_WEIGHT(700);
 pub const SEMI_BOLD: DWRITE_FONT_WEIGHT = DWRITE_FONT_WEIGHT(600);
 pub const NORMAL: DWRITE_FONT_WEIGHT = DWRITE_FONT_WEIGHT(400);
 
@@ -80,6 +88,8 @@ pub struct Text {
     pub layout: IDWriteTextLayout,
     pub width: f32,
     pub height: f32,
+    /// From the top to the base line of the first line.
+    pub baseline: f32,
 }
 
 /// How to make a piece of text.
@@ -90,6 +100,8 @@ pub struct Font {
     pub tabular: bool,
     /// Line height as a part of the size, like CSS `line-height`. `None` uses the font's own.
     pub line_height: Option<f32>,
+    /// Extra space after each letter as a part of the size, like CSS `letter-spacing` in `em`.
+    pub spacing: f32,
 }
 
 impl Draw {
@@ -114,6 +126,11 @@ impl Draw {
 
     /// Lays out one line of text.
     pub fn text(&self, text: &str, font: &Font) -> Result<Text> {
+        self.text_in(text, font, 10_000.0)
+    }
+
+    /// Lays out text that breaks into lines at `max_width` DIPs.
+    pub fn text_in(&self, text: &str, font: &Font, max_width: f32) -> Result<Text> {
         let wide: Vec<u16> = text.encode_utf16().collect();
         let format = unsafe {
             self.dwrite.CreateTextFormat(
@@ -134,8 +151,12 @@ impl Draw {
         }
         let layout = unsafe {
             self.dwrite
-                .CreateTextLayout(&wide, &format, 10_000.0, 10_000.0)
+                .CreateTextLayout(&wide, &format, max_width, 10_000.0)
         }?;
+        let all = DWRITE_TEXT_RANGE {
+            startPosition: 0,
+            length: wide.len() as u32,
+        };
         if font.tabular {
             let typography = unsafe { self.dwrite.CreateTypography() }?;
             unsafe {
@@ -144,18 +165,23 @@ impl Draw {
                     parameter: 1,
                 })
             }?;
-            let all = DWRITE_TEXT_RANGE {
-                startPosition: 0,
-                length: wide.len() as u32,
-            };
             unsafe { layout.SetTypography(&typography, all) }?;
+        }
+        if font.spacing != 0.0 {
+            let layout1: IDWriteTextLayout1 = layout.cast()?;
+            let space = font.spacing * font.size;
+            unsafe { layout1.SetCharacterSpacing(0.0, space, 0.0, all) }?;
         }
         let mut metrics = DWRITE_TEXT_METRICS::default();
         unsafe { layout.GetMetrics(&mut metrics) }?;
+        let mut lines = vec![DWRITE_LINE_METRICS::default(); metrics.lineCount.max(1) as usize];
+        let mut count = 0;
+        unsafe { layout.GetLineMetrics(Some(&mut lines), &mut count) }?;
         Ok(Text {
             layout,
             width: metrics.widthIncludingTrailingWhitespace,
             height: metrics.height,
+            baseline: lines[0].baseline,
         })
     }
 }
@@ -188,11 +214,12 @@ impl Painter<'_> {
         blur: f32,
         colour: D2D1_COLOR_F,
     ) -> Result<()> {
-        const STEPS: usize = 12;
+        // About one layer per DIP, so no steps show.
+        let steps = (blur.ceil() as usize).max(12);
         // Each layer adds a bit, so the middle reaches the full alpha.
-        let alpha = 1.0 - (1.0 - colour.a).powf(1.0 / STEPS as f32);
-        for i in 0..STEPS {
-            let grow = blur / 2.0 * (1.0 - 2.0 * i as f32 / STEPS as f32);
+        let alpha = 1.0 - (1.0 - colour.a).powf(1.0 / steps as f32);
+        for i in 0..steps {
+            let grow = blur / 2.0 * (1.0 - 2.0 * i as f32 / steps as f32);
             let r = D2D_RECT_F {
                 left: rect.left - grow,
                 top: rect.top + dy - grow,
@@ -269,6 +296,13 @@ impl Painter<'_> {
             sink.Close()?;
             self.rt.DrawGeometry(&path, &brush, width, &self.draw.round);
         }
+        Ok(())
+    }
+
+    /// A straight line with round ends.
+    pub fn line(&self, from: Vector2, to: Vector2, width: f32, colour: D2D1_COLOR_F) -> Result<()> {
+        let brush = unsafe { self.rt.CreateSolidColorBrush(&colour, None) }?;
+        unsafe { self.rt.DrawLine(from, to, &brush, width, &self.draw.round) };
         Ok(())
     }
 

@@ -537,6 +537,7 @@ impl Pill {
                     weight: draw::SEMI_BOLD,
                     tabular: true,
                     line_height: None,
+                    spacing: 0.0,
                 },
             )?;
             let width = small::PAD_LEFT + small::DOT + small::GAP + time.width + small::PAD_RIGHT;
@@ -557,6 +558,7 @@ impl Pill {
                 weight: draw::SEMI_BOLD,
                 tabular: true,
                 line_height: Some(large::LINE_HEIGHT),
+                spacing: 0.0,
             },
         )?;
         let label = draw.text(
@@ -566,6 +568,7 @@ impl Pill {
                 weight: draw::NORMAL,
                 tabular: false,
                 line_height: Some(large::LINE_HEIGHT),
+                spacing: 0.0,
             },
         )?;
         let column = time.width.max(label.width);
