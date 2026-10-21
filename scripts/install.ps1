@@ -21,6 +21,10 @@
 .EXAMPLE
     .\install.ps1 -ExePath .\screen-control.exe
     Update the program only.
+
+.EXAMPLE
+    .\install.ps1 -CheckTelegram
+    Install nothing. Show the bot link and send a test message to each parent again.
 #>
 #Requires -RunAsAdministrator
 [CmdletBinding()]
@@ -34,7 +38,9 @@ param(
     [string]$BotToken,
     [string]$GitHubToken,
     # The config repo, as owner/repo.
-    [string]$GitHubRepo
+    [string]$GitHubRepo,
+    # Only show the bot link and send a test message to each parent. Installs nothing.
+    [switch]$CheckTelegram
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,6 +67,127 @@ function Read-Value($prompt, $current) {
     $hint = if ($current) { " (Enter keeps the current value)" } else { " (Enter to leave empty)" }
     $value = Read-Host "$prompt$hint"
     if ($value) { $value } else { $current }
+}
+
+# --- Telegram check ----------------------------------------------------------------------
+# A bot can only send messages to a user who pressed Start in the chat with the bot.
+# These checks only print warnings. They never stop the install.
+# The bot token is in each request URL, so error messages from Invoke-RestMethod are
+# never printed. Only the HTTP status and the Telegram description are shown.
+
+$TelegramApi = "https://api.telegram.org"
+
+function Warn($text) { Write-Host "    $text" -ForegroundColor Yellow }
+
+# Calls a Bot API method. Never throws. Returns an object with:
+# ok, result, code (HTTP status, 0 = no answer), description.
+function Invoke-Telegram($token, $method, $body) {
+    $answer = [pscustomobject]@{ ok = $false; result = $null; code = 0; description = "" }
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $params = @{ Uri = "$TelegramApi/bot$token/$method"; Method = "Post"; TimeoutSec = 15; UseBasicParsing = $true }
+        if ($body) {
+            $params.ContentType = "application/json; charset=utf-8"
+            $params.Body = [Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Compress))
+        }
+        $reply = Invoke-RestMethod @params
+        $answer.ok = [bool]$reply.ok
+        $answer.result = $reply.result
+        $answer.code = 200
+        $answer.description = [string]$reply.description
+    } catch {
+        $response = $null
+        if ($_.Exception.Response) { $response = $_.Exception.Response }
+        if ($response) {
+            try { $answer.code = [int]$response.StatusCode } catch { }
+            # The body of the error answer: {"ok":false,"error_code":403,"description":"..."}
+            $text = $null
+            if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                $text = $_.ErrorDetails.Message
+            } else {
+                try {
+                    $reader = New-Object IO.StreamReader($response.GetResponseStream())
+                    $text = $reader.ReadToEnd()
+                } catch { }
+            }
+            try { $answer.description = [string]($text | ConvertFrom-Json).description } catch { }
+        }
+    }
+    $answer
+}
+
+function Test-Telegram($token, $configPath) {
+    Write-Host ""
+    Step "Telegram check"
+    if (-not $token) {
+        Warn "No bot token in $SecretsPath. Telegram check skipped."
+        return
+    }
+    try {
+        $config = [IO.File]::ReadAllText($configPath) | ConvertFrom-Json
+    } catch {
+        Warn "Cannot read the config $configPath. Telegram check skipped."
+        return
+    }
+
+    $me = Invoke-Telegram $token "getMe" $null
+    if ($me.code -eq 0) {
+        Warn "Cannot reach Telegram (no network?). Telegram check skipped."
+        Warn "Re-check later: $RecheckCommand"
+        return
+    }
+    if (-not $me.ok) {
+        if ($me.code -eq 401 -or $me.code -eq 404) {
+            Warn "The bot token is wrong (HTTP $($me.code)). Install again with the right -BotToken."
+        } else {
+            Warn "getMe failed: HTTP $($me.code) $($me.description)"
+        }
+        return
+    }
+    $link = "https://t.me/$($me.result.username)"
+    Write-Host "    Bot: @$($me.result.username)"
+    Write-Host "    Link: $link"
+    Write-Host "    Each parent (and child with a Telegram ID) must open this link and press Start."
+
+    $text = "Screen Control is installed on $($config.pc_name)."
+    $missing = @()
+    foreach ($parent in @($config.parents)) {
+        # Telegram user IDs fit in Int64. Send them as text so no digits are lost.
+        $id = ([int64]$parent.telegram_user_id).ToString([Globalization.CultureInfo]::InvariantCulture)
+        $sent = Invoke-Telegram $token "sendMessage" @{ chat_id = $id; text = $text }
+        if ($sent.ok) {
+            Write-Host "    $($parent.name) ($id): OK" -ForegroundColor Green
+        } elseif ($sent.code -eq 0) {
+            Warn "$($parent.name) ($id): no answer from Telegram (no network?)"
+            $missing += $parent.name
+        } elseif ($sent.code -eq 403 -or ($sent.code -eq 400 -and $sent.description -match "chat not found")) {
+            Warn "$($parent.name) ($id): not reached - has not pressed Start yet (or wrong ID)"
+            $missing += $parent.name
+        } else {
+            Warn "$($parent.name) ($id): not reached - HTTP $($sent.code) $($sent.description)"
+            $missing += $parent.name
+        }
+    }
+
+    if ($missing.Count -eq 0) {
+        Write-Host "    All parents got the test message." -ForegroundColor Green
+    } else {
+        Warn "Not reached: $($missing -join ', ')."
+        Warn "They must open $link and press Start. Then re-check:"
+        Warn "    $RecheckCommand"
+    }
+}
+
+$RecheckCommand = "powershell -ExecutionPolicy Bypass -File `"$PSCommandPath`" -CheckTelegram   (as Administrator)"
+
+if ($CheckTelegram) {
+    try {
+        $token = (Get-Content $SecretsPath -Raw | ConvertFrom-Json).bot_token
+        Test-Telegram $token $ConfigPath
+    } catch {
+        Warn "Cannot read $SecretsPath. Is Screen Control installed?"
+    }
+    exit 0
 }
 
 # --- Find the program ---------------------------------------------------------------
@@ -186,3 +313,6 @@ Write-Host "Screen Control is installed and running." -ForegroundColor Green
 Write-Host "Last log lines:"
 Get-ChildItem "$DataDir\logs\*.log" | Sort-Object LastWriteTime | Select-Object -Last 1 |
     ForEach-Object { Get-Content $_.FullName -Tail 5 }
+
+# Telegram problems only print warnings. The service is already installed.
+try { Test-Telegram $secrets.bot_token $ConfigPath } catch { Warn "Telegram check failed. Re-check later: $RecheckCommand" }

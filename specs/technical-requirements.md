@@ -172,6 +172,8 @@ One PowerShell script, run as Administrator, that:
 - Creates the data folder and sets its ACL.
 - Asks for the PC name, the bot token and the GitHub token, and writes `secrets.json`.
 - Downloads the first config from the config repo.
+- Shows the bot link (`https://t.me/<bot username>`, from `getMe`) and sends a test message to each parent. Prints which parents still must press Start. Telegram problems only print warnings; the install does not fail.
+- `install.ps1 -CheckTelegram` does only this check again, without installing. It reads the token from `secrets.json`, so it needs Administrator. The token is never printed.
 
 ## PC setup (done by hand)
 

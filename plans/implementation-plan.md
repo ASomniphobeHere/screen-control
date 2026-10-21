@@ -165,6 +165,7 @@ fn tick(cfg: &Config, state: &mut State, now: LocalNow,
 6. `sc failure` — restart after 5 s, every time.
 7. Add the SafeBoot `Minimal` and `Network` registry keys.
 8. Start the service.
+9. Show the bot link from `getMe`, and send each parent a test message. Print who still must press Start. Only warnings, never an error. `install.ps1 -CheckTelegram` runs this check again without installing.
 
 `scripts/uninstall.ps1` does the reverse steps.
 
@@ -215,6 +216,7 @@ Use a spare standard account first, then the children's accounts. Check each ite
 - [ ] The service runs in Safe Mode.
 - [ ] The service restarts after it is killed (as admin).
 - [ ] State survives a power cut (hard power off).
+- [ ] Each parent and child with a Telegram ID opens the bot link from the install, presses Start, and the check is run again (`install.ps1 -CheckTelegram`) until all parents are OK.
 - [ ] Telegram: request, approve, deny, expire, two parents, `/give`, `/take`, `/stop`, `/status`.
 - [ ] Config update from GitHub, and a broken config.
 - [ ] Without internet, limits still work.
