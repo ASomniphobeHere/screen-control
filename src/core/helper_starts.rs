@@ -42,6 +42,15 @@ impl HelperStarts {
     }
 }
 
+/// Children's sessions that have no connected helper.
+pub fn without_helper(child_sessions: &[u32], connected: &HashSet<u32>) -> Vec<u32> {
+    child_sessions
+        .iter()
+        .copied()
+        .filter(|s| !connected.contains(s))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +114,12 @@ mod tests {
             starts.due(t0 + Duration::from_secs(2), &[1], &set(&[])),
             vec![1]
         );
+    }
+
+    #[test]
+    fn sessions_without_helper() {
+        assert_eq!(without_helper(&[1, 2, 3], &set(&[2, 5])), vec![1, 3]);
+        assert!(without_helper(&[2], &set(&[2])).is_empty());
+        assert!(without_helper(&[], &set(&[])).is_empty());
     }
 }

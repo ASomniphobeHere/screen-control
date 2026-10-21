@@ -8,13 +8,17 @@
 //! Waiting for a client blocks the accept thread. That is fine: when the service stops, the process
 //! ends and Windows closes the pipe. Writes have a time limit, so a helper that does not read
 //! cannot block the other helpers.
+//!
+//! Only a client that runs this same program is used. A program a child makes or copies is
+//! disconnected, so it cannot take the place of the real helper and hide the warnings.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use windows::Win32::Foundation::{
@@ -30,11 +34,15 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientSessionId, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeClientSessionId,
+    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
+    PIPE_WAIT,
 };
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
-use windows::core::{HSTRING, PCWSTR};
+use windows::Win32::System::Threading::{
+    CreateEventW, GetCurrentProcess, OpenProcess, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW, WaitForSingleObject,
+};
+use windows::core::{HSTRING, PCWSTR, PWSTR};
 
 use crate::app::Event;
 use crate::helper_protocol::{Message, PIPE_NAME};
@@ -51,10 +59,14 @@ const SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;IU)";
 const BUFFER: u32 = 64 * 1024;
 
 /// A write that takes longer means the helper does not read. It is then dropped.
-const WRITE_TIMEOUT_MS: u32 = 5000;
+const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How long `deliver` waits for the writer thread. Writes are normally done at once.
-const DELIVER_TIMEOUT: Duration = Duration::from_secs(2);
+const DELIVER_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The writer starts a write for `deliver` only if it can end this long before `deliver` stops
+/// waiting. So a message is shown by the helper or in a message box, never both.
+const DELIVER_MARGIN: Duration = Duration::from_millis(500);
 
 /// Sends messages to the helpers. Cheap to use from the main loop: it never waits.
 pub struct Helpers {
@@ -75,9 +87,10 @@ impl Helpers {
     /// box instead. Messages sent before this one are written first.
     pub fn deliver(&self, session: u32, message: Message) -> bool {
         let (done, result) = mpsc::channel();
+        let deadline = Instant::now() + DELIVER_TIMEOUT;
         if self
             .tx
-            .send(Cmd::Send(session, message, Some(done)))
+            .send(Cmd::Send(session, message, Some((done, deadline))))
             .is_err()
         {
             return false;
@@ -99,8 +112,9 @@ impl Helpers {
 
 enum Cmd {
     Connected(u32, Pipe),
-    /// The result is sent back if there is a sender.
-    Send(u32, Message, Option<Sender<Sent>>),
+    /// The result is sent back if there is a sender. The write is not made if it may not end
+    /// before the deadline.
+    Send(u32, Message, Option<(Sender<Sent>, Instant)>),
     KeepOnly(Vec<u32>),
 }
 
@@ -109,6 +123,8 @@ enum Cmd {
 ///
 /// Fails if the pipe name is already taken by another program.
 pub fn start(events: Sender<Event>) -> Result<Helpers> {
+    let own_exe = process_image(unsafe { GetCurrentProcess() })
+        .context("cannot get this program's path, helpers are off")?;
     let security = Security::new()?;
     let first = Pipe::create(&security, true).context(
         "cannot make the pipe (another program may have taken the name), helpers are off",
@@ -123,14 +139,21 @@ pub fn start(events: Sender<Event>) -> Result<Helpers> {
         .context("cannot start the pipe thread")?;
     thread::Builder::new()
         .name("pipe-accept".into())
-        .spawn(move || accept_all(first, &security, &to_writer, &events))
+        .spawn(move || accept_all(first, &security, &own_exe, &to_writer, &events))
         .context("cannot start the pipe thread")?;
     tracing::info!(pipe = %PIPE_NAME, "pipe ready for helpers");
     Ok(Helpers { tx, connected })
 }
 
-fn accept_all(first: Pipe, security: &Security, writer: &Sender<Cmd>, events: &Sender<Event>) {
+fn accept_all(
+    first: Pipe,
+    security: &Security,
+    own_exe: &Path,
+    writer: &Sender<Cmd>,
+    events: &Sender<Event>,
+) {
     let mut next = Some(first);
+    let mut rejects = LogLimit::default();
     loop {
         let pipe = match next
             .take()
@@ -155,6 +178,20 @@ fn accept_all(first: Pipe, security: &Security, writer: &Sender<Cmd>, events: &S
                 continue;
             }
         };
+        // Dropping the pipe disconnects the client.
+        let problem = match pipe.client_exe() {
+            Ok(exe) if same_path(&exe, own_exe) => None,
+            Ok(exe) => Some(format!("client is not this program: {}", exe.display())),
+            Err(e) => Some(format!("cannot check the client: {e:#}")),
+        };
+        if let Some(problem) = problem {
+            if let Some(more) = rejects.log_now(Instant::now()) {
+                tracing::warn!(session, more, "{problem}, disconnected");
+            }
+            // A client that connects again and again cannot keep this thread busy.
+            thread::sleep(REJECT_PAUSE);
+            continue;
+        }
         tracing::info!(session, "helper connected");
         if writer.send(Cmd::Connected(session, pipe)).is_err()
             || events.send(Event::HelperConnected { session }).is_err()
@@ -174,11 +211,22 @@ fn write_all(rx: Receiver<Cmd>, connected: &Mutex<HashSet<u32>>) {
                 }
             }
             Cmd::Send(session, message, done) => {
-                let sent = clients.send(session, &message);
-                if let Sent::Failed(e) = &sent {
-                    tracing::warn!(session, error = %e, "cannot write to the helper, dropped");
+                let late = done
+                    .as_ref()
+                    .is_some_and(|(_, deadline)| too_late(Instant::now(), *deadline));
+                let sent = if late {
+                    clients.drop_late(session)
+                } else {
+                    clients.send(session, &message)
+                };
+                match &sent {
+                    Sent::Failed(e) => {
+                        tracing::warn!(session, error = %e, "cannot write to the helper, dropped")
+                    }
+                    Sent::Late => tracing::warn!(session, "helpers too slow, helper dropped"),
+                    _ => {}
                 }
-                if let Some(done) = done {
+                if let Some((done, _)) = done {
                     let _ = done.send(sent);
                 }
             }
@@ -202,13 +250,18 @@ pub enum Sent {
     NoClient,
     /// The write failed and the helper was dropped.
     Failed(io::Error),
+    /// `deliver` could stop waiting before the write ends, so nothing was written and the helper
+    /// was dropped. The writer was slow because this or another helper did not read.
+    Late,
 }
 
 impl PartialEq for Sent {
     /// Errors are equal if their kinds are.
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Sent::Written, Sent::Written) | (Sent::NoClient, Sent::NoClient) => true,
+            (Sent::Written, Sent::Written)
+            | (Sent::NoClient, Sent::NoClient)
+            | (Sent::Late, Sent::Late) => true,
             (Sent::Failed(a), Sent::Failed(b)) => a.kind() == b.kind(),
             _ => false,
         }
@@ -248,6 +301,15 @@ impl<W: Write> Clients<W> {
         }
     }
 
+    /// Writes nothing and drops the session's client, for a message that goes to a message box
+    /// instead. The helper connects again and gets the next messages.
+    fn drop_late(&mut self, session: u32) -> Sent {
+        match self.by_session.remove(&session) {
+            Some(_) => Sent::Late,
+            None => Sent::NoClient,
+        }
+    }
+
     /// Drops the clients of sessions not in the list. Returns the dropped sessions.
     fn keep_only(&mut self, sessions: &[u32]) -> Vec<u32> {
         let ended: Vec<u32> = self
@@ -261,6 +323,70 @@ impl<W: Write> Clients<W> {
         }
         ended
     }
+}
+
+/// Time between log lines about rejected clients, so a client that connects again and again does
+/// not fill the log.
+const REJECT_LOG_EVERY: Duration = Duration::from_secs(60);
+
+/// Wait after a rejected client.
+const REJECT_PAUSE: Duration = Duration::from_millis(200);
+
+/// Allows one log line per `REJECT_LOG_EVERY`.
+#[derive(Default)]
+struct LogLimit {
+    last: Option<Instant>,
+    /// Lines not logged since the last one.
+    hidden: u32,
+}
+
+impl LogLimit {
+    /// Returns the number of lines not logged before this one, or `None` if this one is not logged.
+    fn log_now(&mut self, now: Instant) -> Option<u32> {
+        if self
+            .last
+            .is_some_and(|t| now.saturating_duration_since(t) < REJECT_LOG_EVERY)
+        {
+            self.hidden += 1;
+            return None;
+        }
+        self.last = Some(now);
+        Some(std::mem::take(&mut self.hidden))
+    }
+}
+
+/// True if a write for `deliver` that starts at `now` may not end before `deliver` stops waiting.
+fn too_late(now: Instant, deadline: Instant) -> bool {
+    now + WRITE_TIMEOUT + DELIVER_MARGIN > deadline
+}
+
+/// True if both are the same file path. Windows paths do not depend on case.
+fn same_path(a: &Path, b: &Path) -> bool {
+    normal(a) == normal(b)
+}
+
+fn normal(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('/', "\\");
+    let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    text.to_lowercase()
+}
+
+/// The full path of a process's program.
+fn process_image(process: HANDLE) -> Result<PathBuf> {
+    let mut buf = vec![0u16; 1024];
+    let mut len = buf.len() as u32;
+    unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+    }
+    .context("QueryFullProcessImageNameW failed")?;
+    Ok(PathBuf::from(String::from_utf16_lossy(
+        &buf[..len as usize],
+    )))
 }
 
 /// The security descriptor made from `SDDL`. Freed on drop.
@@ -364,6 +490,18 @@ impl Pipe {
         Ok(session)
     }
 
+    /// The program the client runs.
+    fn client_exe(&self) -> Result<PathBuf> {
+        let mut pid = 0;
+        unsafe { GetNamedPipeClientProcessId(self.handle, &mut pid) }
+            .context("GetNamedPipeClientProcessId failed")?;
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+            .with_context(|| format!("OpenProcess failed for process {pid}"))?;
+        let image = process_image(process);
+        let _ = unsafe { CloseHandle(process) };
+        image
+    }
+
     fn overlapped(&self) -> OVERLAPPED {
         OVERLAPPED {
             hEvent: self.event,
@@ -373,7 +511,7 @@ impl Pipe {
 }
 
 impl Write for Pipe {
-    /// Waits up to `WRITE_TIMEOUT_MS`. The pipe buffer is large, so this only waits when the
+    /// Waits up to `WRITE_TIMEOUT`. The pipe buffer is large, so this only waits when the
     /// client has stopped reading.
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut ov = self.overlapped();
@@ -382,7 +520,9 @@ impl Write for Pipe {
         {
             return Err(io::Error::other(e));
         }
-        if unsafe { WaitForSingleObject(self.event, WRITE_TIMEOUT_MS) } != WAIT_OBJECT_0 {
+        if unsafe { WaitForSingleObject(self.event, WRITE_TIMEOUT.as_millis() as u32) }
+            != WAIT_OBJECT_0
+        {
             // `ov` must stay alive until the cancel is done, so wait for the result below.
             let _ = unsafe { CancelIoEx(self.handle, Some(&ov)) };
         }
@@ -505,6 +645,67 @@ mod tests {
         assert_eq!(
             clients.by_session.keys().copied().collect::<Vec<_>>(),
             vec![2]
+        );
+    }
+
+    #[test]
+    fn late_message_is_not_written_and_drops_the_client() {
+        let mut slow = Fake::default();
+        let mut clients = Clients::default();
+        clients.connect(5, &mut slow);
+        assert_eq!(clients.drop_late(5), Sent::Late);
+        assert!(clients.by_session.is_empty());
+        assert_eq!(clients.drop_late(5), Sent::NoClient);
+        drop(clients);
+        assert_eq!(text(&slow), "");
+    }
+
+    #[test]
+    fn write_starts_only_if_it_ends_before_deliver_stops_waiting() {
+        let now = Instant::now();
+        assert!(!too_late(now, now + DELIVER_TIMEOUT));
+        assert!(!too_late(now, now + WRITE_TIMEOUT + DELIVER_MARGIN));
+        assert!(too_late(
+            now,
+            now + WRITE_TIMEOUT + DELIVER_MARGIN - Duration::from_millis(1)
+        ));
+        assert!(too_late(now, now));
+    }
+
+    #[test]
+    fn same_path_ignores_case_slashes_and_long_path_prefix() {
+        let own = Path::new(r"C:\Program Files\ScreenControl\screen-control.exe");
+        assert!(same_path(own, own));
+        assert!(same_path(
+            Path::new(r"c:\program files\screencontrol\SCREEN-CONTROL.EXE"),
+            own
+        ));
+        assert!(same_path(
+            Path::new(r"\\?\C:\Program Files\ScreenControl\screen-control.exe"),
+            own
+        ));
+        assert!(same_path(
+            Path::new("C:/Program Files/ScreenControl/screen-control.exe"),
+            own
+        ));
+        // A copy in a folder the child can write to.
+        assert!(!same_path(
+            Path::new(r"C:\Users\kid\Downloads\screen-control.exe"),
+            own
+        ));
+    }
+
+    #[test]
+    fn rejected_clients_are_logged_once_a_minute() {
+        let mut limit = LogLimit::default();
+        let t0 = Instant::now();
+        assert_eq!(limit.log_now(t0), Some(0));
+        assert_eq!(limit.log_now(t0 + Duration::from_secs(1)), None);
+        assert_eq!(limit.log_now(t0 + Duration::from_secs(59)), None);
+        assert_eq!(limit.log_now(t0 + REJECT_LOG_EVERY), Some(2));
+        assert_eq!(
+            limit.log_now(t0 + REJECT_LOG_EVERY + Duration::from_secs(1)),
+            None
         );
     }
 }

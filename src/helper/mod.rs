@@ -3,7 +3,9 @@
 //!
 //! - `helper`: one copy per session. Shows the timer and the popups. A thread reads the pipe and
 //!   gives each message to the window thread.
-//! - `helper --print`: prints each message, for testing. Not limited to one copy.
+//! - `helper --print`: prints each message, for testing. Not limited to one copy. Only in debug
+//!   builds: it runs the real program, so the service would take it as the helper, and a child
+//!   could use it to hide the warnings.
 //! - `helper --show <popup>...`: shows sample popups without the service, to see how they look.
 //!   It only draws in the user's own session and changes nothing.
 
@@ -45,6 +47,10 @@ const MUTEX_NAME: &str = r"Local\ScreenControlHelper";
 
 pub fn run(args: &[String]) -> Result<ExitCode> {
     if args.iter().any(|a| a == "--print") {
+        if !cfg!(debug_assertions) {
+            eprintln!("helper --print is only in debug builds");
+            return Ok(ExitCode::FAILURE);
+        }
         logging::init_console();
         read_messages(|line, message| {
             let time = chrono::Local::now().format("%H:%M:%S");

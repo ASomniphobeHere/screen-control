@@ -63,7 +63,8 @@ The service runs in session 0 and cannot show its own windows on the child's scr
   - `warn` — minutes left and reason,
   - `time_up` — seconds until sign-out, reason, and if the child can ask for more time,
   - `extra_time` — minutes given or taken, and by which parent.
-- The helper sends nothing back in this version. A fake helper made by a child only receives its own time left, so it is not a risk.
+- The helper sends nothing back in this version.
+- The service only uses a client that runs its own `.exe` (`GetNamedPipeClientProcessId`, `QueryFullProcessImageNameW`). Other clients are disconnected, so a fake helper cannot take the place of the real one and hide the warnings. Users cannot write to the install folder.
 - While a helper is connected for a session, the service does not send message boxes to that session. If not, it uses `WTSSendMessageW` as before.
 
 ### Windows

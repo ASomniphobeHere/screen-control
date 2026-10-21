@@ -65,6 +65,22 @@ pub fn time_left(child: &Child, cs: &ChildState, now: &LocalNow) -> TimeLeft {
     }
 }
 
+/// Time until `left_ms` reaches the next warning point or zero. A tick at that moment shows the
+/// warning or the time-up at once, not up to one tick later. `None` when the time is already up.
+pub fn until_next_point(left_ms: i64) -> Option<Duration> {
+    if left_ms <= 0 {
+        return None;
+    }
+    // A point is passed when the time left is at or below it, so the next one is below.
+    let next = WARN_MINUTES
+        .into_iter()
+        .map(|m| m as i64 * 60_000)
+        .filter(|&p| p < left_ms)
+        .max()
+        .unwrap_or(0);
+    Some(Duration::from_millis((left_ms - next) as u64))
+}
+
 /// An active Windows session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
@@ -591,5 +607,17 @@ mod tests {
         t.state.child_mut("janis").used_ms = 100 * 60_000;
         // 120 - 100 = 20 minutes left: no warning yet.
         assert!(t.tick(&[session(1, JANIS)]).is_empty());
+    }
+
+    #[test]
+    fn next_point_is_the_next_warning_or_zero() {
+        let min = |m: u64| Duration::from_secs(m * 60);
+        assert_eq!(until_next_point(25 * 60_000), Some(min(15)));
+        // At 10:00 the 10-minute warning is done, so 5 minutes is next.
+        assert_eq!(until_next_point(10 * 60_000), Some(min(5)));
+        assert_eq!(until_next_point(60_001), Some(Duration::from_millis(1)));
+        assert_eq!(until_next_point(30_000), Some(Duration::from_secs(30)));
+        assert_eq!(until_next_point(0), None);
+        assert_eq!(until_next_point(-5_000), None);
     }
 }

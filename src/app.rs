@@ -12,7 +12,7 @@ use crate::core::commands::{self, Input, Out};
 use crate::core::config::{Config, Secrets};
 use crate::core::day;
 use crate::core::engine::{self, Action, Engine, Reason, Session};
-use crate::core::helper_starts::HelperStarts;
+use crate::core::helper_starts::{self, HelperStarts};
 use crate::core::state::State;
 use crate::helper_protocol::Message;
 use crate::telegram::api::Update;
@@ -24,6 +24,10 @@ pub const TICK: Duration = Duration::from_secs(20);
 
 /// Time between checks for new sessions. A tick also runs this often while a sign-out is pending.
 const POLL: Duration = Duration::from_secs(1);
+
+/// After a start, how long the first tick waits for the helpers of signed-in children to connect.
+/// Helpers that were running connect again within about 2 seconds after the service restarts.
+const HELPER_WAIT: Duration = Duration::from_secs(3);
 
 const MESSAGE_TITLE: &str = "Screen time";
 
@@ -236,6 +240,7 @@ pub fn run(
         helpers,
         child_sessions: Vec::new(),
         helper_starts: HelperStarts::default(),
+        early_tick: None,
     };
     tracing::info!(
         pc = %app.cfg.pc_name,
@@ -246,10 +251,16 @@ pub fn run(
         "running"
     );
 
+    app.wait_for_helpers();
+
     let mut last_tick: Option<Instant> = None;
     let mut known_sessions = Vec::new();
     loop {
-        let mut now = match events.recv_timeout(POLL) {
+        // Wake up for an early tick, if one is due before the next poll.
+        let timeout = app.early_tick.map_or(POLL, |t| {
+            POLL.min(t.saturating_duration_since(Instant::now()))
+        });
+        let mut now = match events.recv_timeout(timeout) {
             Ok(Event::Stop) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(Event::SessionChanged) => {
                 tracing::info!("session changed");
@@ -292,7 +303,8 @@ pub fn run(
             Ok(_) => {}
             Err(e) => tracing::error!(error = format!("{e:#}"), "cannot list sessions"),
         }
-        let tick_due = last_tick.is_none_or(|t| t.elapsed() >= TICK);
+        let tick_due = last_tick.is_none_or(|t| t.elapsed() >= TICK)
+            || app.early_tick.is_some_and(|t| Instant::now() >= t);
         if now || tick_due || app.engine.has_pending() {
             app.tick();
             last_tick = Some(Instant::now());
@@ -379,6 +391,8 @@ struct App {
     /// Active sessions of children, from the last tick. Each gets a helper.
     child_sessions: Vec<u32>,
     helper_starts: HelperStarts,
+    /// A tick before the next regular one, when a child's time reaches a warning point or zero.
+    early_tick: Option<Instant>,
 }
 
 impl App {
@@ -574,6 +588,7 @@ impl App {
     }
 
     fn tick(&mut self) {
+        self.early_tick = None;
         let now = win::clock::unbiased_now();
         let delta = now.saturating_sub(self.last_clock);
         self.last_clock = now;
@@ -594,6 +609,7 @@ impl App {
         let actions = self
             .engine
             .tick(&self.cfg, &mut self.state, Utc::now(), delta, &sessions);
+        self.early_tick = self.next_point(&sessions).map(|d| Instant::now() + d);
         // Before the actions, so a helper knows the child's name before a warning.
         self.send_status(sessions.iter());
         for action in actions {
@@ -602,6 +618,63 @@ impl App {
         let expired = commands::expire(&self.cfg, &mut self.state, Utc::now());
         self.dispatch(expired);
         self.save();
+    }
+
+    /// Time until a signed-in child's time reaches a warning point or zero, if that comes before
+    /// the next regular tick. Then the warning or time-up shows on time, not up to a tick later.
+    fn next_point(&self, sessions: &[Session]) -> Option<Duration> {
+        let utc = day::effective_utc(Utc::now(), self.state.last_seen_utc);
+        let now = day::local_now(utc, self.cfg.utc_offset_minutes);
+        sessions
+            .iter()
+            // Locked sessions are not counted, so their time does not run out.
+            .filter(|s| !s.locked)
+            .filter_map(|s| {
+                let child = self.cfg.child_by_sid(&s.sid)?;
+                let cs = self
+                    .state
+                    .children
+                    .get(&child.id)
+                    .cloned()
+                    .unwrap_or_default();
+                engine::until_next_point(engine::time_left(child, &cs, &now).left_ms)
+            })
+            .min()
+            .filter(|&d| d < TICK)
+    }
+
+    /// Waits up to `HELPER_WAIT` for the helpers of signed-in children to connect, so a warning
+    /// on the first tick goes to the helper, not to a message box. Stops when all are connected.
+    fn wait_for_helpers(&self) {
+        let Some(helpers) = &self.helpers else {
+            return;
+        };
+        let children: Vec<u32> = match win::sessions::active_sessions() {
+            Ok(sessions) => sessions
+                .iter()
+                .filter(|s| self.cfg.child_by_sid(&s.sid).is_some())
+                .map(|s| s.id)
+                .collect(),
+            Err(_) => return, // The first tick logs it.
+        };
+        let start = Instant::now();
+        loop {
+            let missing = helper_starts::without_helper(&children, &helpers.connected());
+            if missing.is_empty() {
+                if !children.is_empty() {
+                    tracing::info!(
+                        waited_ms = start.elapsed().as_millis() as u64,
+                        "helpers connected"
+                    );
+                }
+                return;
+            }
+            if start.elapsed() >= HELPER_WAIT {
+                tracing::info!(sessions = ?missing, "no helper connected yet, going on");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// Sends the time left to the helper of each child's session.
