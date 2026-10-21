@@ -59,9 +59,9 @@ The service runs in session 0 and cannot show its own windows on the child's scr
 - Pipe access (ACL): SYSTEM full, signed-in users connect only.
 - The service checks which session a client is in with `GetNamedPipeClientSessionId`, and only sends a session its own child's data.
 - Messages are JSON, one per line, from the service to the helper:
-  - `status` — time left, reason, limit, every tick,
+  - `status` — child name, time left, limit, reason and `show_timer`, every tick,
   - `warn` — minutes left and reason,
-  - `time_up` — seconds until sign-out,
+  - `time_up` — seconds until sign-out, reason, and if the child can ask for more time,
   - `extra_time` — minutes given or taken, and by which parent.
 - The helper sends nothing back in this version. A fake helper made by a child only receives its own time left, so it is not a risk.
 - While a helper is connected for a session, the service does not send message boxes to that session. If not, it uses `WTSSendMessageW` as before.
@@ -89,7 +89,8 @@ The service runs in session 0 and cannot show its own windows on the child's scr
   - the Windows account SID on this PC,
   - their Telegram user ID,
   - limits in minutes for each week day (`mon` … `sun`), with `default` for days not set. Every day must have a limit,
-  - allowed hours, for example `08:00-21:00` (optional: without it, any hour is allowed).
+  - allowed hours, for example `08:00-21:00` (optional: without it, any hour is allowed),
+  - `show_timer` — show the timer window (optional, default `true`).
 - `state.json` — for each child: today's used time and extra time. Also open extra time requests and the last seen UTC time.
 - Example `config.json`:
 

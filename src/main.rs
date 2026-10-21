@@ -1,6 +1,9 @@
 mod app;
 mod config_sync;
 mod core;
+// Used by the pipe server and the helper (better warnings plan, steps 2 to 6).
+#[allow(dead_code)]
+mod helper_protocol;
 mod logging;
 mod service;
 mod storage;

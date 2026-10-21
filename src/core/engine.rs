@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use chrono::Weekday;
 
@@ -39,7 +40,8 @@ pub struct Session {
     pub locked: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Reason {
     /// The daily limit is used up.
     Budget,

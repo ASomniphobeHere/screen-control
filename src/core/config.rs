@@ -39,6 +39,15 @@ pub struct Child {
     /// No value means use is allowed at any hour.
     #[serde(default)]
     pub allowed_hours: Option<TimeRange>,
+    /// Show the timer window of the helper program.
+    #[serde(default = "yes")]
+    // Read by the service when it sends `status` (better warnings plan, step 6).
+    #[allow(dead_code)]
+    pub show_timer: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// Daily limits in minutes. A day without its own value uses `default`.
@@ -440,6 +449,22 @@ pub mod tests {
             errors_after(|c| c.children[0].limits.sat = Some(2000)).len(),
             1
         );
+    }
+
+    #[test]
+    fn show_timer_is_on_by_default() {
+        assert!(good().children.iter().all(|c| c.show_timer));
+    }
+
+    #[test]
+    fn show_timer_can_be_turned_off() {
+        let text = GOOD.replace(
+            r#""limits": { "default": 30 }"#,
+            r#""limits": { "default": 30 }, "show_timer": false"#,
+        );
+        let cfg = Config::from_json(&text).unwrap();
+        assert!(cfg.children[0].show_timer);
+        assert!(!cfg.children[1].show_timer);
     }
 
     #[test]
