@@ -32,6 +32,18 @@
 - Find the date from UTC time plus a fixed offset in the config. Do not use the system time zone.
 - Save the last seen UTC time. If the clock goes back, continue the current day. Do not reset it.
 
+## Extra time after hours
+
+- Time given outside the allowed hours is saved as a pass for that child: start and end in UTC.
+- A pass is active while start ≤ now < end, with "now" from the same clock rule as the day change (a small clock change back is ignored).
+  - If the clock is put back before the start, the pass is ended. This stops a big clock change back from making it longer.
+  - Putting the clock forward only makes it shorter.
+- Passes are kept apart from the daily state, so a new day does not clear them. Ended passes are removed.
+- While a pass is active: time left = end − now, the limit for the timer ring = end − start, and the reason is `extra`. The budget and the allowed hours are not used.
+- A grant makes a pass if the time now is outside the allowed hours, or if a pass is already active (then the end moves later). Otherwise it is added to extra time, as before.
+- `/take` during a pass moves the end earlier. `/stop` ends the pass and also ends today's budget, as before.
+- `reason` in the helper messages gets a third value: `extra`.
+
 ## Enforcement
 
 - `WTSSendMessageW` — show warning messages in the user's session from the service.
@@ -92,7 +104,7 @@ The service runs in session 0 and cannot show its own windows on the child's scr
   - limits in minutes for each week day (`mon` … `sun`), with `default` for days not set. Every day must have a limit,
   - allowed hours, for example `08:00-21:00` (optional: without it, any hour is allowed),
   - `show_timer` — show the timer window (optional, default `true`).
-- `state.json` — for each child: today's used time and extra time. Also open extra time requests and the last seen UTC time.
+- `state.json` — for each child: today's used time and extra time. Also open extra time requests, passes for time after hours, and the last seen UTC time.
 - Example `config.json`:
 
   ```json

@@ -60,6 +60,19 @@ Planned after Telegram and config updates. Until then, warnings are plain Window
 - A parent can end a child's time now: `/stop <name>`.
 - Only parents can approve, give, take or stop. Children can only ask for time and see their own status.
 
+## Extra time after hours
+
+- Normally, extra time is added to today's budget. Outside the allowed hours this does nothing, because the hours still block use.
+- So time given outside the allowed hours works differently: it starts at once, on the clock. `/give 30` at 21:40 lets the child use the PC until 22:10.
+- At the end, the child is signed out, whether the time was used or not. Time spent signed out, locked or asleep still runs.
+- During this time, the daily budget and the allowed hours do not apply. Used time is still counted, for `/status`.
+- The same applies to an approved request (`/more`) outside the allowed hours.
+- `/give` again during this time makes it longer. `/take` makes it shorter. `/stop` ends it at once.
+- It goes on past midnight if needed. Giving after midnight but before the hours start (for example at 06:30, hours from 08:00) works the same way.
+- Inside the allowed hours, `/give` works as before.
+- The parent's reply says until when: "Done. Jānis can use the PC until 22:10 (outside the allowed hours)."
+- The warnings, timer and time-up window work as usual. Their text says "your extra time ends soon" and "your extra time is over".
+
 ## Many parents
 
 - The program supports two or more parents. Each parent has a name (for example "Mom").
