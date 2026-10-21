@@ -1,6 +1,9 @@
 //! Log to the terminal in console mode, and to a daily log file in service mode.
+//! The helper logs to a small file in the user's own folder.
 
+use std::fs::OpenOptions;
 use std::path::Path;
+use std::sync::Mutex;
 
 use anyhow::Result;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -9,6 +12,9 @@ use tracing_subscriber::EnvFilter;
 
 /// Log files kept, one per day.
 const KEEP_FILES: usize = 30;
+
+/// The helper's log starts over when it is bigger than this.
+const HELPER_LOG_MAX: u64 = 64 * 1024;
 
 /// The log level can be changed with the `RUST_LOG` environment variable.
 fn filter() -> EnvFilter {
@@ -38,4 +44,28 @@ pub fn init_file(dir: &Path) -> Result<WorkerGuard> {
         .with_ansi(false)
         .init();
     Ok(guard)
+}
+
+/// Appends to the file, or starts it over when it is too big. The helper only logs starts,
+/// connects and errors, so the file stays small.
+pub fn init_helper(path: &Path) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let too_big = std::fs::metadata(path).is_ok_and(|m| m.len() > HELPER_LOG_MAX);
+    let file = if too_big {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?
+    } else {
+        OpenOptions::new().append(true).create(true).open(path)?
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(filter())
+        .with_writer(Mutex::new(file))
+        .with_ansi(false)
+        .init();
+    Ok(())
 }

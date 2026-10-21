@@ -12,6 +12,7 @@ use crate::core::commands::{self, Input, Out};
 use crate::core::config::{Config, Secrets};
 use crate::core::day;
 use crate::core::engine::{self, Action, Engine, Reason, Session};
+use crate::core::helper_starts::HelperStarts;
 use crate::core::state::State;
 use crate::helper_protocol::Message;
 use crate::telegram::api::Update;
@@ -233,6 +234,8 @@ pub fn run(
         telegram,
         sync,
         helpers,
+        child_sessions: Vec::new(),
+        helper_starts: HelperStarts::default(),
     };
     tracing::info!(
         pc = %app.cfg.pc_name,
@@ -280,6 +283,9 @@ pub fn run(
         match win::sessions::active_session_ids() {
             Ok(ids) if ids != known_sessions => {
                 tracing::info!(sessions = ?ids, "active sessions changed");
+                if let Some(helpers) = &app.helpers {
+                    helpers.keep_only(&ids);
+                }
                 known_sessions = ids;
                 now = true;
             }
@@ -291,6 +297,7 @@ pub fn run(
             app.tick();
             last_tick = Some(Instant::now());
         }
+        app.start_helpers();
     }
 
     app.save();
@@ -314,6 +321,9 @@ struct App {
     sync: Option<Sender<i64>>,
     /// `None` when the pipe cannot be made.
     helpers: Option<Helpers>,
+    /// Active sessions of children, from the last tick. Each gets a helper.
+    child_sessions: Vec<u32>,
+    helper_starts: HelperStarts,
 }
 
 impl App {
@@ -499,6 +509,11 @@ impl App {
                 return;
             }
         };
+        self.child_sessions = sessions
+            .iter()
+            .filter(|s| self.cfg.child_by_sid(&s.sid).is_some())
+            .map(|s| s.id)
+            .collect();
         let actions = self
             .engine
             .tick(&self.cfg, &mut self.state, Utc::now(), delta, &sessions);
@@ -538,6 +553,25 @@ impl App {
                     show_timer: child.show_timer,
                 },
             );
+        }
+    }
+
+    /// Starts the helper in each child's session that has none. Called every second, so a killed
+    /// helper is back soon after the service notices it is gone.
+    fn start_helpers(&mut self) {
+        let Some(helpers) = &self.helpers else {
+            return;
+        };
+        let due =
+            self.helper_starts
+                .due(Instant::now(), &self.child_sessions, &helpers.connected());
+        for session in due {
+            match win::launch::start_helper(session) {
+                Ok(pid) => tracing::info!(session, pid, "helper started"),
+                Err(e) => {
+                    tracing::warn!(session, error = format!("{e:#}"), "cannot start the helper")
+                }
+            }
         }
     }
 

@@ -23,6 +23,8 @@ Usage:
   screen-control service [--data-dir DIR]            run as a Windows service (started by Windows)
   screen-control console [--data-dir DIR]            run in this terminal, for testing
   screen-control check-config FILE [--pc-name NAME]  check a config file
+  screen-control helper                              the helper the service starts in each
+                                                     child's session
   screen-control helper --print                      print the messages the service sends to
                                                      this session, for testing
 

@@ -9,9 +9,10 @@
 //! ends and Windows closes the pipe. Writes have a time limit, so a helper that does not read
 //! cannot block the other helpers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -55,6 +56,8 @@ const WRITE_TIMEOUT_MS: u32 = 5000;
 /// Sends messages to the helpers. Cheap to use from the main loop: it never waits.
 pub struct Helpers {
     tx: Sender<Cmd>,
+    /// Sessions with a connected helper. Kept up to date by the writer thread.
+    connected: Arc<Mutex<HashSet<u32>>>,
 }
 
 impl Helpers {
@@ -63,11 +66,23 @@ impl Helpers {
         // Fails only if the writer thread has ended. Then there are no helpers.
         let _ = self.tx.send(Cmd::Send(session, message));
     }
+
+    /// Sessions with a connected helper. A helper that has ended is only noticed when a write to
+    /// it fails, so at the latest one tick later.
+    pub fn connected(&self) -> HashSet<u32> {
+        self.connected.lock().map(|c| c.clone()).unwrap_or_default()
+    }
+
+    /// Drops the helpers of sessions not in the list, for sessions that have ended.
+    pub fn keep_only(&self, sessions: &[u32]) {
+        let _ = self.tx.send(Cmd::KeepOnly(sessions.to_vec()));
+    }
 }
 
 enum Cmd {
     Connected(u32, Pipe),
     Send(u32, Message),
+    KeepOnly(Vec<u32>),
 }
 
 /// Makes the pipe and starts both threads. Each new client is also sent to the main loop as
@@ -81,16 +96,18 @@ pub fn start(events: Sender<Event>) -> Result<Helpers> {
     )?;
     let (tx, rx) = mpsc::channel();
     let to_writer = tx.clone();
+    let connected = Arc::new(Mutex::new(HashSet::new()));
+    let shared = connected.clone();
     thread::Builder::new()
         .name("pipe-write".into())
-        .spawn(move || write_all(rx))
+        .spawn(move || write_all(rx, &shared))
         .context("cannot start the pipe thread")?;
     thread::Builder::new()
         .name("pipe-accept".into())
         .spawn(move || accept_all(first, &security, &to_writer, &events))
         .context("cannot start the pipe thread")?;
     tracing::info!(pipe = %PIPE_NAME, "pipe ready for helpers");
-    Ok(Helpers { tx })
+    Ok(Helpers { tx, connected })
 }
 
 fn accept_all(first: Pipe, security: &Security, writer: &Sender<Cmd>, events: &Sender<Event>) {
@@ -128,7 +145,7 @@ fn accept_all(first: Pipe, security: &Security, writer: &Sender<Cmd>, events: &S
     }
 }
 
-fn write_all(rx: Receiver<Cmd>) {
+fn write_all(rx: Receiver<Cmd>, connected: &Mutex<HashSet<u32>>) {
     let mut clients = Clients::default();
     for cmd in rx {
         match cmd {
@@ -142,6 +159,14 @@ fn write_all(rx: Receiver<Cmd>) {
                     tracing::warn!(session, error = %e, "cannot write to the helper, dropped");
                 }
             }
+            Cmd::KeepOnly(sessions) => {
+                for session in clients.keep_only(&sessions) {
+                    tracing::info!(session, "session ended, helper dropped");
+                }
+            }
+        }
+        if let Ok(mut c) = connected.lock() {
+            *c = clients.by_session.keys().copied().collect();
         }
     }
 }
@@ -176,6 +201,20 @@ impl<W: Write> Clients<W> {
             self.by_session.remove(&session);
         }
         result
+    }
+
+    /// Drops the clients of sessions not in the list. Returns the dropped sessions.
+    fn keep_only(&mut self, sessions: &[u32]) -> Vec<u32> {
+        let ended: Vec<u32> = self
+            .by_session
+            .keys()
+            .copied()
+            .filter(|s| !sessions.contains(s))
+            .collect();
+        for s in &ended {
+            self.by_session.remove(s);
+        }
+        ended
     }
 }
 
@@ -406,5 +445,18 @@ mod tests {
         assert!(clients.by_session.is_empty());
         // Later messages to the session are not an error.
         clients.send(4, &warn(1)).unwrap();
+    }
+
+    #[test]
+    fn keep_only_drops_ended_sessions() {
+        let (mut a, mut b) = (Fake::default(), Fake::default());
+        let mut clients = Clients::default();
+        clients.connect(1, &mut a);
+        clients.connect(2, &mut b);
+        assert_eq!(clients.keep_only(&[2, 3]), vec![1]);
+        assert_eq!(
+            clients.by_session.keys().copied().collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 }
