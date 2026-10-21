@@ -135,7 +135,7 @@ impl TimeRange {
 
 impl Config {
     pub fn from_json(text: &str) -> Result<Config> {
-        Ok(serde_json::from_str(text)?)
+        Ok(serde_json::from_str(strip_bom(text))?)
     }
 
     pub fn load(path: &Path) -> Result<Config> {
@@ -282,8 +282,14 @@ impl Secrets {
     pub fn load(path: &Path) -> Result<Secrets> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?;
-        serde_json::from_str(&text).with_context(|| format!("bad secrets in {}", path.display()))
+        serde_json::from_str(strip_bom(&text))
+            .with_context(|| format!("bad secrets in {}", path.display()))
     }
+}
+
+/// Windows PowerShell 5.1 and some editors put a byte order mark at the start of UTF-8 files.
+fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
 #[cfg(test)]
@@ -341,6 +347,11 @@ pub mod tests {
         let cfg = good();
         assert_eq!(cfg.children[0].limits.for_day(Weekday::Sat), Some(120));
         assert_eq!(cfg.children[0].limits.for_day(Weekday::Mon), Some(60));
+    }
+
+    #[test]
+    fn byte_order_mark_is_ignored() {
+        assert!(Config::from_json(&format!("\u{feff}{GOOD}")).is_ok());
     }
 
     #[test]
