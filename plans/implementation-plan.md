@@ -222,6 +222,14 @@ Use a spare standard account first, then the children's accounts. Check each ite
 
 Then remove Microsoft Family Safety from the children's accounts and run the service on both PCs.
 
+### Step 12: Better warnings
+
+A timer and better-looking warning windows, shown by a helper program in the child's session. This step has its own plan: `plans/better-warnings-plan.md`.
+
+It can be done before or after step 11. The plain message boxes work until then.
+
+**Done when:** the checklist in step 7 of that plan passes.
+
 ## Order and size
 
 | Step | Size |
@@ -231,5 +239,6 @@ Then remove Microsoft Family Safety from the children's accounts and run the ser
 | 9 Telegram | Medium. |
 | 10 Config updates | Small. |
 | 11 Testing | Small, but do not skip it. |
+| 12 Better warnings | Medium. See its own plan. |
 
 After Step 8, the service already limits time on its own. Telegram and config updates can follow after that.
