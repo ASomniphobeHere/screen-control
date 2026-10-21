@@ -797,6 +797,10 @@ mod tests {
             Notice::warn("Jānis", 1, Reason::Hours).text,
             "Jānis, screen time ends in 1 minute: allowed hours are almost over."
         );
+        assert_eq!(
+            Notice::warn("Jānis", 5, Reason::Extra).text,
+            "Jānis, your extra time ends in 5 minutes."
+        );
     }
 
     #[test]
@@ -815,6 +819,10 @@ mod tests {
         assert_eq!(
             Notice::time_up("Pēteris", Reason::Hours, 5, false).text,
             "Pēteris, screen time is not allowed at this hour.\n\nYou will be signed out in 5 seconds."
+        );
+        assert_eq!(
+            Notice::time_up("Jānis", Reason::Extra, 10, false).text,
+            "Jānis, your extra time is over.\n\nYou will be signed out in 10 seconds."
         );
     }
 

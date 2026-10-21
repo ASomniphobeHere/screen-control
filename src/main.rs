@@ -29,7 +29,8 @@ Usage:
                                                      this session, for testing (debug builds)
   screen-control helper --show POPUP...              show sample popups, 5 seconds apart, to
                                                      see how they look (warn10, warn5, warn1,
-                                                     time-up, time-up-hours, extra, taken)
+                                                     warn-extra, time-up, time-up-hours,
+                                                     time-up-extra, extra, taken)
 
 The data folder is C:\\ProgramData\\ScreenTime unless --data-dir is given.";
 

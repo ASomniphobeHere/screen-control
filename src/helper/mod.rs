@@ -135,8 +135,10 @@ fn sample(name: &str) -> Option<Message> {
         "warn10" => warn(10, Reason::Budget),
         "warn5" => warn(5, Reason::Budget),
         "warn1" => warn(1, Reason::Hours),
+        "warn-extra" => warn(1, Reason::Extra),
         "time-up" => time_up(Reason::Budget, true),
         "time-up-hours" => time_up(Reason::Hours, false),
+        "time-up-extra" => time_up(Reason::Extra, false),
         "extra" => extra(30, "Mom"),
         "taken" => extra(-15, "Dad"),
         _ => return None,
@@ -147,7 +149,9 @@ fn sample(name: &str) -> Option<Message> {
 /// older one, and quits 20 seconds after the last.
 fn show_samples(names: &[String]) -> Result<ExitCode> {
     let Some(messages) = names.iter().map(|n| sample(n)).collect::<Option<Vec<_>>>() else {
-        eprintln!("popups: warn10, warn5, warn1, time-up, time-up-hours, extra, taken");
+        eprintln!(
+            "popups: warn10, warn5, warn1, warn-extra, time-up, time-up-hours, time-up-extra, extra, taken"
+        );
         return Ok(ExitCode::FAILURE);
     };
     let mut ui = Ui::new(None)?;

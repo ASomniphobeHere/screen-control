@@ -173,6 +173,14 @@ Parents:
 If the PC has only one child, the name can be left out, for example `/give 30`.
 When one parent gives, takes or stops time, the other parents get a short note.
 
+Extra time after hours: if the allowed hours end before the given time would run out, the time
+starts at once and runs on the clock. For example, `/give 30` at 21:40 (hours until 21:00) lets
+the child use the PC until 22:10, and `/give 30` at 20:55 until 21:25. During this time the
+daily limit and the allowed hours do not apply. At the end the child is signed out, even if the
+time was not used. `/give` again makes it longer, `/take` makes it shorter and `/stop` ends it.
+The same applies to an approved `/more` request. A child without allowed hours always gets the
+time added to today's limit.
+
 Children:
 
 | Command | What it does |
@@ -195,7 +203,7 @@ Children:
 | `C:\ProgramData\ScreenTime\config.json` | The config in use. |
 | `C:\ProgramData\ScreenTime\config.last-good.json` | Backup of the last good config. |
 | `C:\ProgramData\ScreenTime\secrets.json` | Tokens. Only SYSTEM and Administrators can read it. |
-| `C:\ProgramData\ScreenTime\state.json` | Time used today, extra time, open requests. |
+| `C:\ProgramData\ScreenTime\state.json` | Time used today, extra time, passes for extra time after hours, open requests. |
 | `C:\ProgramData\ScreenTime\logs\` | Daily service logs. |
 | `%LOCALAPPDATA%\ScreenControl\` | The child's timer position and the helper log. |
 
@@ -207,7 +215,8 @@ screen-control console [--data-dir DIR]            run in this terminal, for tes
 screen-control check-config FILE [--pc-name NAME]  check a config file
 screen-control helper                              the helper in each child's session
 screen-control helper --show POPUP...              show sample popups (warn10, warn5, warn1,
-                                                   time-up, time-up-hours, extra, taken)
+                                                   warn-extra, time-up, time-up-hours,
+                                                   time-up-extra, extra, taken)
 ```
 
 ## Known limits

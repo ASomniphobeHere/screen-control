@@ -80,12 +80,14 @@ All in `src/core`, no Windows calls, so it is all unit tested.
 
 **Test in the VM** (it needs a test config with allowed hours that end soon, and Telegram messages from a parent account):
 
-- [ ] Outside the hours, `testkid` is signed out. `/give 5` from a parent: `testkid` can sign in, the timer shows 5:00 and counts down, also while the screen is locked.
-- [ ] Inside the hours, a few minutes before they end, `/give 5`: the timer shows 5:00, past the hours end.
-- [ ] Warning at 1 minute says "extra time". Time-up at 0:00, then the sign-out.
-- [ ] Signing in again after the end: signed out after a few seconds, with reason "not allowed at this hour".
-- [ ] `/status` shows "until hh:mm" during the pass.
-- [ ] Service restart during the pass: the pass is kept, with the same end.
+The VM config has no allowed hours for `testkid`, and its budget was used up. So the pass was added to `state.json` by hand (service stopped, pass from now to now + 7 min, service started), not by a parent's `/give`.
+
+- [x] Outside the hours, `testkid` is signed out. `/give 5` from a parent: `testkid` can sign in, the timer shows 5:00 and counts down, also while the screen is locked. (VM, pass added by hand: with the budget used up, `testkid` could sign in, the timer showed 7 min and counted down. Locked for about 1 minute: the time left went down by the same, and the 5-minute warning came after unlocking. The real `/give` is left for the user.)
+- [ ] Inside the hours, a few minutes before they end, `/give 5`: the timer shows 5:00, past the hours end. (Left for the user: needs a config with allowed hours and a parent's `/give`. Covered by unit tests.)
+- [x] Warning at 1 minute says "extra time". Time-up at 0:00, then the sign-out. (VM: warnings at 5 and 1 minute "your extra time ends soon", time-up at 0:00 "your extra time is over", signed out 10 s later.)
+- [x] Signing in again after the end: signed out after a few seconds, with reason "not allowed at this hour". (VM: signed out after 5 s. The reason was "used up", because the VM config has no allowed hours. The hours reason after a pass is covered by unit tests.)
+- [ ] `/status` shows "until hh:mm" during the pass. (Left for the user: needs Telegram. Covered by unit tests.)
+- [x] Service restart during the pass: the pass is kept, with the same end. (VM)
 
 ## Order and size
 

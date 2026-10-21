@@ -1096,6 +1096,10 @@ mod tests {
             "The allowed hours end soon. Save what you are doing."
         );
         assert_eq!(
+            warn_text(Some("Jānis"), Reason::Extra),
+            "Jānis, your extra time ends soon. Save what you are doing."
+        );
+        assert_eq!(
             warn_text(Some(" "), Reason::Budget),
             "Your screen time for today ends soon. Save what you are doing."
         );
@@ -1116,6 +1120,10 @@ mod tests {
         assert_eq!(
             time_up_text(None, Reason::Hours, false),
             "Screen time is not allowed at this hour."
+        );
+        assert_eq!(
+            time_up_text(Some("Jānis"), Reason::Extra, false),
+            "Jānis, your extra time is over."
         );
     }
 
