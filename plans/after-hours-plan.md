@@ -4,8 +4,8 @@ This plan builds "Extra time after hours" in `specs/features.md` and `specs/tech
 
 ## Main idea
 
-- Today, `/give` outside the allowed hours adds to the budget, but the hours still block use. The grant does nothing.
-- New: a grant outside the allowed hours makes a **pass**: a start and an end in UTC. While the pass is active, time left is `end − now`. The budget and the hours are not used.
+- Today, `/give` outside the allowed hours adds to the budget, but the hours still block use. The grant does nothing. Just before the hours end, it gives only the minutes until the end.
+- New: a grant of N minutes, when the allowed hours end in less than N minutes (or already ended), makes a **pass**: a start and an end in UTC. While the pass is active, time left is `end − now`. The budget and the hours are not used.
 - The engine already signs out when time left reaches zero, warns at 10, 5 and 1 minute, and cancels a pending sign-out when time is added. A pass only changes how time left is found, so all of this keeps working.
 
 ## Changed files
@@ -43,7 +43,7 @@ All in `src/core`, no Windows calls, so it is all unit tested.
 - `commands.rs`:
   - New `grant(cfg, state, now, child, minutes) -> Granted`, used by `/give` and the approve button.
     - Active pass: move its end later by `minutes`.
-    - Outside the allowed hours: new pass from now to now + `minutes`.
+    - The allowed hours end in less than `minutes` from now (0 when outside the hours): new pass from now to now + `minutes`.
     - Otherwise: add to `extra_ms`, as now.
     - `Granted` says which, and the pass end, for the replies.
   - `/take` with an active pass: move its end earlier (it ends if the end is now or before). Otherwise as now.
@@ -55,7 +55,8 @@ All in `src/core`, no Windows calls, so it is all unit tested.
 **Tests:**
 
 - `/give 30` at 21:40 (hours 08:00–21:00): pass until 22:10. `/give 15` again: until 22:25. `/take 10`: until 22:15.
-- `/give 30` inside the hours: adds to `extra_ms`, no pass (today's tests still pass).
+- `/give 30` at 20:55: pass until 21:25.
+- `/give 30` at 20:00 or at 20:30 (hours end in 30 min, not less): adds to `extra_ms`, no pass (today's tests still pass).
 - Approve button at 21:40: pass, same as `/give`.
 - `/stop` during a pass: pass removed, time left 0.
 - Engine: with a pass, time left counts down on the clock, also while the session is locked or gone; warnings at 10, 5 and 1 with reason `Extra`; time-up at the end, then the reason is `Hours` again.
@@ -77,9 +78,10 @@ All in `src/core`, no Windows calls, so it is all unit tested.
 - `README.md`: one paragraph under Telegram commands.
 - Tick the checklist below.
 
-**Test in the VM** (ask the user first: it needs a test config with allowed hours that end soon, and Telegram messages from a parent account):
+**Test in the VM** (it needs a test config with allowed hours that end soon, and Telegram messages from a parent account):
 
 - [ ] Outside the hours, `testkid` is signed out. `/give 5` from a parent: `testkid` can sign in, the timer shows 5:00 and counts down, also while the screen is locked.
+- [ ] Inside the hours, a few minutes before they end, `/give 5`: the timer shows 5:00, past the hours end.
 - [ ] Warning at 1 minute says "extra time". Time-up at 0:00, then the sign-out.
 - [ ] Signing in again after the end: signed out after a few seconds, with reason "not allowed at this hour".
 - [ ] `/status` shows "until hh:mm" during the pass.

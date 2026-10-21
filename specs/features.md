@@ -62,14 +62,14 @@ Planned after Telegram and config updates. Until then, warnings are plain Window
 
 ## Extra time after hours
 
-- Normally, extra time is added to today's budget. Outside the allowed hours this does nothing, because the hours still block use.
-- So time given outside the allowed hours works differently: it starts at once, on the clock. `/give 30` at 21:40 lets the child use the PC until 22:10.
+- Normally, extra time is added to today's budget. Outside the allowed hours this does nothing, because the hours still block use. Just before the hours end, it gives only the minutes until the end.
+- So time given when the allowed hours end before the given minutes would run out works differently: it starts at once, on the clock. `/give 30` at 21:40 (hours until 21:00) lets the child use the PC until 22:10. `/give 30` at 20:55 lets the child use it until 21:25.
 - At the end, the child is signed out, whether the time was used or not. Time spent signed out, locked or asleep still runs.
 - During this time, the daily budget and the allowed hours do not apply. Used time is still counted, for `/status`.
-- The same applies to an approved request (`/more`) outside the allowed hours.
+- The same applies to an approved request (`/more`).
 - `/give` again during this time makes it longer. `/take` makes it shorter. `/stop` ends it at once.
 - It goes on past midnight if needed. Giving after midnight but before the hours start (for example at 06:30, hours from 08:00) works the same way.
-- Inside the allowed hours, `/give` works as before.
+- When the hours do not end before the given minutes would run out (for example `/give 30` at 20:00), `/give` works as before.
 - The parent's reply says until when: "Done. Jānis can use the PC until 22:10 (outside the allowed hours)."
 - The warnings, timer and time-up window work as usual. Their text says "your extra time ends soon" and "your extra time is over".
 
