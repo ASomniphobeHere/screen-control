@@ -58,6 +58,32 @@ $SafeBootKeys = @(
 
 function Step($text) { Write-Host "==> $text" -ForegroundColor Cyan }
 
+# Stops the service and waits until its process has ended, then ends the helpers in the
+# children's sessions. Windows shows the service as Stopped a little before its process ends,
+# and the helpers keep running without the service. Both keep files open: the program in
+# $InstallDir and the logs in $DataDir.
+function Stop-ScreenControl {
+    $service = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
+    if ($service -and $service.State -ne "Stopped") {
+        Step "Stopping the service"
+        Stop-Service $ServiceName -Force
+        (Get-Service $ServiceName).WaitForStatus("Stopped", (New-TimeSpan -Seconds 30))
+        if ($service.ProcessId) {
+            Wait-Process -Id $service.ProcessId -Timeout 15 -ErrorAction SilentlyContinue
+            Stop-Process -Id $service.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $helpers = @(Get-CimInstance Win32_Process -Filter "Name='screen-control.exe'" |
+        Where-Object { $_.ExecutablePath -eq $InstalledExe })
+    if ($helpers) {
+        Step "Ending $($helpers.Count) helper(s)"
+        foreach ($helper in $helpers) {
+            Stop-Process -Id $helper.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        Wait-Process -Id $helpers.ProcessId -Timeout 15 -ErrorAction SilentlyContinue
+    }
+}
+
 # JSON without a byte order mark. Windows PowerShell 5.1 adds one with -Encoding UTF8.
 function Write-Utf8File($path, $text) {
     [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding($false)))
@@ -268,16 +294,15 @@ if (Test-Path $newConfig) {
         Remove-Item $newConfig
         throw "The config has errors. Nothing was installed."
     }
-    Move-Item $newConfig $ConfigPath -Force
 }
 
 # --- Program and service -----------------------------------------------------------------
 
+# The config is good. Stop first, so the service does not have config.json open.
 $service = Get-Service $ServiceName -ErrorAction SilentlyContinue
-if ($service -and $service.Status -ne "Stopped") {
-    Step "Stopping the service"
-    Stop-Service $ServiceName -Force
-    (Get-Service $ServiceName).WaitForStatus("Stopped", (New-TimeSpan -Seconds 30))
+Stop-ScreenControl
+if (Test-Path $newConfig) {
+    Move-Item $newConfig $ConfigPath -Force
 }
 
 Step "Copying the program to $InstallDir"

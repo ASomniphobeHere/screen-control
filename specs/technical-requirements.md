@@ -177,7 +177,7 @@ The service runs in session 0 and cannot show its own windows on the child's scr
 
 One PowerShell script, run as Administrator, that:
 
-- Copies the program file.
+- Copies the program file. Before that, it stops the service, waits until its process has ended, and ends the helpers that run the installed program. The helpers keep running without the service, and they keep the program file open. The uninstall script does the same before it deletes the files.
 - Creates the service with `New-Service`, automatic start.
 - Sets restart on failure with `sc failure`.
 - Adds the service to `HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal` and `...\SafeBoot\Network`, so it runs in Safe Mode.

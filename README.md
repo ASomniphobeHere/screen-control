@@ -136,8 +136,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -ConfigFile .\pc-1.json
 1. Makes `C:\ProgramData\ScreenTime`. Only SYSTEM and Administrators can open it.
 2. Saves `secrets.json` there (PC name, bot token, GitHub token and repo). Secrets stay only on the PC.
 3. Gets the config and checks it with the new program. If it has errors, nothing is changed.
-4. Copies the program to `C:\Program Files\ScreenControl`, then makes and starts the `ScreenControl`
-   service, with restart on failure and Safe Mode support.
+4. Stops the service and the helpers in the children's sessions, if they run. Copies the program to
+   `C:\Program Files\ScreenControl`, then makes and starts the `ScreenControl` service, with restart
+   on failure and Safe Mode support. The service starts the helpers again.
 5. Prints the bot link (`https://t.me/<bot>`) and sends each parent "Screen Control is installed on
    <PC name>." It lists the parents who were not reached.
 
